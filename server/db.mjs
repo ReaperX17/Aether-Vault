@@ -357,9 +357,11 @@ export function upsertCardCache(card) {
   );
 }
 
-// Seed initial data if database hasn't been initialized yet
-const initRow = db.prepare(`SELECT value FROM sync_meta WHERE key = 'seeded_v1'`).get();
-if (!initRow) {
+// Seed initial data or upgrade owner snapshot if database hasn't loaded owner_snapshot_v3 yet
+const snapshotSyncRow = db.prepare(`SELECT value FROM sync_meta WHERE key = 'owner_snapshot_v3'`).get();
+const ownerInvCount = db.prepare(`SELECT COUNT(*) as cnt FROM inventory WHERE COALESCE(user_id, 1) = 1`).get()?.cnt || 0;
+
+if (!snapshotSyncRow || ownerInvCount < 100) {
   for (const c of SEED_CARDS) {
     upsertCardCache(c);
   }
@@ -407,7 +409,7 @@ if (!initRow) {
           }
         }
 
-        if (Array.isArray(snap.inventory)) {
+        if (ownerInvCount < 100 && Array.isArray(snap.inventory)) {
           const insInv = db.prepare(`
             INSERT OR REPLACE INTO inventory (id, user_id, scryfall_id, name, set_code, collector_number, quantity, finish, condition, language, location, purchase_price, notes, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), COALESCE(?, CURRENT_TIMESTAMP))
@@ -433,7 +435,7 @@ if (!initRow) {
           }
         }
 
-        if (Array.isArray(snap.decks)) {
+        if (ownerInvCount < 100 && Array.isArray(snap.decks)) {
           const insDeck = db.prepare(`
             INSERT OR REPLACE INTO decks (id, user_id, name, format, folder, description, commander_scryfall_id, partner_scryfall_id, cover_image, color_identity, tags, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), COALESCE(?, CURRENT_TIMESTAMP))
@@ -457,7 +459,7 @@ if (!initRow) {
           }
         }
 
-        if (Array.isArray(snap.deck_cards)) {
+        if (ownerInvCount < 100 && Array.isArray(snap.deck_cards)) {
           const insDc = db.prepare(`
             INSERT OR REPLACE INTO deck_cards (id, deck_id, scryfall_id, name, quantity, board, finish, custom_category, force_buy)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -478,7 +480,7 @@ if (!initRow) {
         }
 
         db.exec('COMMIT');
-        console.log(`[AetherVault] Pre-loaded owner vault snapshot (${snap.inventory?.length || 0} card entries, ${snap.decks?.length || 0} decks).`);
+        console.log(`[AetherVault] Synced owner vault snapshot v3 (${snap.inventory?.length || 0} card entries, ${snap.decks?.length || 0} decks).`);
       } catch (txErr) {
         db.exec('ROLLBACK');
         throw txErr;
@@ -488,7 +490,8 @@ if (!initRow) {
     }
   }
 
-  db.prepare(`INSERT INTO sync_meta (key, value) VALUES ('seeded_v1', 'true')`).run();
+  db.prepare(`INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('seeded_v1', 'true')`).run();
+  db.prepare(`INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('owner_snapshot_v3', 'true')`).run();
 }
 
 export function runDailyDatabaseBackup() {

@@ -1,0 +1,4 @@
+aether-vault.com, www.aether-vault.com, aether-vault.net, www.aether-vault.net {
+    encode zstd gzip
+    reverse_proxy aethervault:3000
+}

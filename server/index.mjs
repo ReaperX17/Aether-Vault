@@ -1,0 +1,2255 @@
+import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import { db, upsertCardCache } from './db.mjs';
+import {
+  searchScryfallCards,
+  getCardPrintings,
+  batchResolveScryfallCards,
+  refreshCollectionPrices,
+  syncCardKingdomPricelist,
+  hydrateCardRow,
+  importProgressState,
+  cleanCardNameForLookup
+} from './pricing.mjs';
+import {
+  analyzeAndValidateDeck,
+  computeInventoryDeckAllocations,
+  getCardUnitPrice,
+  isRelentlessCard,
+  parseImportPayload
+} from './deck_utils.mjs';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PORT = Number(process.env.PORT || 3000);
+const isProd = process.env.NODE_ENV === 'production' || process.argv.includes('--prod');
+if (isProd) {
+  process.env.NODE_ENV = 'production';
+}
+
+// Prevent transient network/socket errors from ever crashing the background server process
+process.on('uncaughtException', err => {
+  console.error('[AetherVault] Uncaught Exception (server kept alive):', err?.message || err);
+});
+process.on('unhandledRejection', reason => {
+  console.error('[AetherVault] Unhandled Rejection (server kept alive):', reason);
+});
+
+// In-memory generation cache per user so parallel GET /api/dashboard, /api/inventory, and /api/decks calls
+// share computed allocations instead of re-querying and re-parsing 4,500+ rows multiple times
+let dataCacheVersion = 1;
+const cachedInventoryByUser = new Map();
+const cachedDecksByUser = new Map();
+
+function invalidateDataCache() {
+  dataCacheVersion++;
+  cachedInventoryByUser.clear();
+  cachedDecksByUser.clear();
+}
+
+function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
+  const hash = crypto.scryptSync(String(password), salt, 64).toString('hex');
+  return { hash, salt };
+}
+
+function verifyPassword(password, storedHash, storedSalt, legacyPin = '') {
+  const raw = String(password || '');
+  if (storedHash && storedSalt) {
+    try {
+      const derived = crypto.scryptSync(raw, storedSalt, 64);
+      const expected = Buffer.from(storedHash, 'hex');
+      return derived.length === expected.length && crypto.timingSafeEqual(derived, expected);
+    } catch {
+      return false;
+    }
+  }
+  if (legacyPin && String(legacyPin).trim().length > 0) {
+    return raw.trim() === String(legacyPin).trim();
+  }
+  return false;
+}
+
+function createSession(userId) {
+  const token = crypto.randomBytes(32).toString('hex');
+  const expiresAt = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString();
+  db.prepare(`INSERT INTO user_sessions (token, user_id, expires_at) VALUES (?, ?, ?)`).run(token, userId, expiresAt);
+  return token;
+}
+
+function parseCookies(cookieHeader = '') {
+  const out = {};
+  if (!cookieHeader) return out;
+  for (const part of cookieHeader.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx > 0) {
+      const k = part.slice(0, idx).trim();
+      const v = part.slice(idx + 1).trim();
+      out[k] = decodeURIComponent(v);
+    }
+  }
+  return out;
+}
+
+function extractSessionToken(req) {
+  const headerToken = req.headers['x-auth-token'];
+  if (headerToken && typeof headerToken === 'string' && headerToken.trim()) {
+    return headerToken.trim();
+  }
+  const authHeader = req.headers['authorization'];
+  if (authHeader && typeof authHeader === 'string' && authHeader.toLowerCase().startsWith('bearer ')) {
+    return authHeader.slice(7).trim();
+  }
+  const cookies = parseCookies(req.headers['cookie'] || '');
+  if (cookies.aethervault_session) {
+    return cookies.aethervault_session;
+  }
+  return null;
+}
+
+function isPublicHostRequest(req) {
+  if (isProd || process.env.PUBLIC_MULTI_TENANT === 'true') return true;
+  const host = String(req.headers['x-forwarded-host'] || req.headers['host'] || '').toLowerCase().split(':')[0];
+  if (!host) return false;
+  if (
+    host === 'localhost' ||
+    host === '127.0.0.1' ||
+    host === '::1' ||
+    host.startsWith('192.168.') ||
+    host.startsWith('10.') ||
+    /^172\.(1[6-9]|2\d|3[0-1])\./.test(host) ||
+    host.endsWith('.local')
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function resolveRequestAuth(req, url) {
+  const isPublic = isPublicHostRequest(req);
+  const token = extractSessionToken(req);
+
+  if (token) {
+    const sess = db
+      .prepare(
+        `SELECT s.token, s.user_id, u.id, u.name, u.avatar_color, u.password_hash, u.pin_code
+         FROM user_sessions s
+         JOIN users u ON u.id = s.user_id
+         WHERE s.token = ? AND s.expires_at > datetime('now')`
+      )
+      .get(token);
+    if (sess) {
+      return {
+        authenticated: true,
+        userId: Number(sess.user_id),
+        token: sess.token,
+        isPublic
+      };
+    }
+  }
+
+  // On local PC / Home Wi-Fi (non-production), allow passwordless convenience ONLY for local profiles that have not set a password/PIN
+  if (!isPublic) {
+    const rawId = req.headers['x-user-id'] || url.searchParams.get('userId') || 1;
+    const requestedId = Number(rawId);
+    const targetId = Number.isFinite(requestedId) && requestedId >= 1 ? requestedId : 1;
+    const localUser = db.prepare(`SELECT * FROM users WHERE id = ?`).get(targetId);
+    if (localUser) {
+      const hasPassword = Boolean(
+        (localUser.password_hash && String(localUser.password_hash).length > 0) ||
+          (localUser.pin_code && String(localUser.pin_code).trim().length > 0)
+      );
+      if (!hasPassword) {
+        return {
+          authenticated: true,
+          userId: Number(localUser.id),
+          token: null,
+          isPublic: false
+        };
+      }
+    }
+  }
+
+  return {
+    authenticated: false,
+    userId: null,
+    token: null,
+    isPublic
+  };
+}
+
+function getOwnedDeck(deckId, userId) {
+  return db
+    .prepare(`SELECT * FROM decks WHERE id = ? AND COALESCE(user_id, 1) = ?`)
+    .get(Number(deckId), Number(userId));
+}
+
+function getLanNetworkInfo() {
+  const interfaces = os.networkInterfaces();
+  const lanIps = [];
+  for (const [ifaceName, addrs] of Object.entries(interfaces)) {
+    for (const addr of addrs || []) {
+      if (addr.family === 'IPv4' && !addr.internal) {
+        lanIps.push({ ip: addr.address, iface: ifaceName });
+      }
+    }
+  }
+  // Prioritize standard home Wi-Fi / LAN ranges (192.168.x.x, 10.x.x.x, 172.16-31.x.x)
+  lanIps.sort((a, b) => {
+    const score = ip => (ip.startsWith('192.168.') ? 3 : ip.startsWith('10.') ? 2 : 1);
+    return score(b.ip) - score(a.ip);
+  });
+  const ips = lanIps.map(x => x.ip);
+  const lanUrls = ips.map(ip => `http://${ip}:${PORT}`);
+  return {
+    port: PORT,
+    hostname: os.hostname(),
+    localUrl: `http://localhost:${PORT}`,
+    lanIps: ips,
+    lanUrls,
+    primaryLanUrl: lanUrls[0] || `http://localhost:${PORT}`
+  };
+}
+
+function getAllUsersWithStats(onlyUserId = null) {
+  const users = onlyUserId
+    ? db.prepare(`SELECT id, name, email, avatar_color, pin_code, password_hash, created_at FROM users WHERE id = ?`).all(Number(onlyUserId))
+    : db.prepare(`SELECT id, name, email, avatar_color, pin_code, password_hash, created_at FROM users ORDER BY id ASC`).all();
+  const invStats = db.prepare(`SELECT COALESCE(user_id, 1) as uid, COALESCE(SUM(quantity), 0) as totalCards, COUNT(*) as uniqueEntries FROM inventory GROUP BY COALESCE(user_id, 1)`).all();
+  const deckStats = db.prepare(`SELECT COALESCE(user_id, 1) as uid, COUNT(*) as totalDecks FROM decks GROUP BY COALESCE(user_id, 1)`).all();
+  const invMap = new Map(invStats.map(r => [Number(r.uid), r]));
+  const deckMap = new Map(deckStats.map(r => [Number(r.uid), Number(r.totalDecks || 0)]));
+
+  return users.map(u => {
+    const uid = Number(u.id);
+    const st = invMap.get(uid);
+    const hasPassword = Boolean(
+      (u.password_hash && String(u.password_hash).length > 0) ||
+        (u.pin_code && String(u.pin_code).trim().length > 0)
+    );
+    return {
+      id: uid,
+      name: u.name,
+      email: u.email || '',
+      avatar_color: u.avatar_color || 'amber',
+      has_pin: hasPassword,
+      has_password: hasPassword,
+      totalCards: Number(st?.totalCards || 0),
+      uniqueEntries: Number(st?.uniqueEntries || 0),
+      totalDecks: deckMap.get(uid) || 0,
+      created_at: u.created_at
+    };
+  });
+}
+
+function getSingleUserWithStats(userId) {
+  const list = getAllUsersWithStats(userId);
+  return list[0] || null;
+}
+
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    req.on('data', chunk => {
+      data += chunk;
+      if (data.length > 100 * 1024 * 1024) {
+        reject(new Error('Payload too large'));
+      }
+    });
+    req.on('end', () => {
+      if (!data) return resolve({});
+      try {
+        resolve(JSON.parse(data));
+      } catch (e) {
+        reject(new Error('Invalid JSON payload'));
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
+function sendJson(res, status, payload, extraHeaders = {}) {
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'SAMEORIGIN',
+    'Referrer-Policy': 'strict-origin-when-cross-origin',
+    ...extraHeaders
+  });
+  res.end(JSON.stringify(payload));
+}
+
+function getAllActiveDeckUsages(userId = 1) {
+  return db.prepare(`
+    SELECT
+      dc.deck_id,
+      d.name as deck_name,
+      d.format as deck_format,
+      dc.scryfall_id,
+      dc.name,
+      dc.quantity,
+      dc.board,
+      dc.finish,
+      COALESCE(dc.force_buy, 0) as force_buy
+    FROM deck_cards dc
+    JOIN decks d ON dc.deck_id = d.id
+    WHERE COALESCE(d.user_id, 1) = ? AND dc.board IN ('commander', 'mainboard', 'sideboard')
+    ORDER BY dc.deck_id ASC, dc.id ASC
+  `).all(userId);
+}
+
+function getAllInventoryEnriched(userId = 1) {
+  const cached = cachedInventoryByUser.get(userId);
+  if (cached && cached.version === dataCacheVersion) {
+    return cached.items;
+  }
+
+  const rows = db.prepare(`
+    SELECT
+      i.id, i.scryfall_id, i.name, i.set_code, i.collector_number,
+      i.quantity, i.finish, i.condition, i.language, i.location,
+      i.purchase_price, i.notes, i.created_at, i.updated_at,
+      c.oracle_id, c.set_name, c.mana_cost, c.cmc, c.type_line,
+      c.oracle_text, c.colors, c.color_identity, c.rarity,
+      c.image_normal, c.image_small, c.image_art_crop,
+      c.tcg_usd, c.tcg_usd_foil, c.tcg_usd_etched,
+      c.tcgplayer_id, c.tcgplayer_url, c.cardkingdom_url,
+      c.ck_retail_nonfoil, c.ck_retail_foil,
+      c.ck_buylist_nonfoil, c.ck_buylist_foil,
+      c.ck_qty_nonfoil, c.ck_qty_foil,
+      c.legalities, c.produced_mana, c.power, c.toughness, c.keywords
+    FROM inventory i
+    LEFT JOIN cards_cache c ON i.scryfall_id = c.scryfall_id
+    WHERE COALESCE(i.user_id, 1) = ?
+    ORDER BY i.updated_at DESC, i.id DESC
+  `).all(userId);
+
+  const items = rows.map(r => {
+    const card = hydrateCardRow(r);
+    const unit = getCardUnitPrice(card, card.finish);
+    return {
+      ...card,
+      unit_tcg: unit.tcg,
+      unit_ck_retail: unit.ckRetail,
+      unit_ck_buylist: unit.ckBuylist,
+      total_tcg: Math.round(unit.tcg * card.quantity * 100) / 100,
+      total_ck_retail: Math.round(unit.ckRetail * card.quantity * 100) / 100,
+      total_ck_buylist: Math.round(unit.ckBuylist * card.quantity * 100) / 100
+    };
+  });
+
+  const activeDeckUsages = getAllActiveDeckUsages(userId);
+  const allocated = computeInventoryDeckAllocations(items, activeDeckUsages);
+  cachedInventoryByUser.set(userId, { version: dataCacheVersion, items: allocated });
+  return allocated;
+}
+
+function getDeckCardsEnriched(deckId) {
+  const rows = db.prepare(`
+    SELECT
+      dc.id, dc.deck_id, dc.scryfall_id, dc.name, dc.quantity,
+      dc.board, dc.finish, dc.custom_category, COALESCE(dc.force_buy, 0) as force_buy,
+      c.oracle_id, c.set_code, c.set_name, c.collector_number,
+      c.mana_cost, c.cmc, c.type_line, c.oracle_text,
+      c.colors, c.color_identity, c.rarity,
+      c.image_normal, c.image_small, c.image_art_crop,
+      c.tcg_usd, c.tcg_usd_foil, c.tcg_usd_etched,
+      c.tcgplayer_id, c.tcgplayer_url, c.cardkingdom_url,
+      c.ck_retail_nonfoil, c.ck_retail_foil,
+      c.ck_buylist_nonfoil, c.ck_buylist_foil,
+      c.ck_qty_nonfoil, c.ck_qty_foil,
+      c.legalities, c.produced_mana, c.power, c.toughness, c.keywords
+    FROM deck_cards dc
+    LEFT JOIN cards_cache c ON dc.scryfall_id = c.scryfall_id
+    WHERE dc.deck_id = ?
+    ORDER BY
+      CASE dc.board
+        WHEN 'commander' THEN 0
+        WHEN 'mainboard' THEN 1
+        WHEN 'sideboard' THEN 2
+        ELSE 3
+      END,
+      c.cmc ASC,
+      dc.name ASC
+  `).all(deckId);
+
+  return rows.map(r => {
+    const card = hydrateCardRow(r);
+    const unit = getCardUnitPrice(card, card.finish);
+    return {
+      ...card,
+      unit_tcg: unit.tcg,
+      unit_ck_retail: unit.ckRetail,
+      unit_ck_buylist: unit.ckBuylist
+    };
+  });
+}
+
+async function handleApi(req, res, url) {
+  const pathname = url.pathname;
+  const method = req.method || 'GET';
+
+  if (method !== 'GET') {
+    invalidateDataCache();
+  }
+
+  try {
+    // Healthcheck endpoint for Cloud / Docker / Load Balancers (aether-vault.com & aether-vault.net)
+    if (pathname === '/api/health' && method === 'GET') {
+      return sendJson(res, 200, {
+        status: 'ok',
+        service: 'AetherVault',
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    const auth = resolveRequestAuth(req, url);
+
+    // 0. Authentication & Personal Account Isolation Endpoints (/api/auth/*)
+    if (pathname === '/api/auth/me' && method === 'GET') {
+      if (!auth.authenticated || !auth.userId) {
+        return sendJson(res, 200, {
+          authenticated: false,
+          user: null,
+          isPublic: auth.isPublic
+        });
+      }
+      const activeToken = auth.token || createSession(auth.userId);
+      const userObj = getSingleUserWithStats(auth.userId);
+      const cookieHeader = `aethervault_session=${encodeURIComponent(activeToken)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=7776000${auth.isPublic ? '; Secure' : ''}`;
+      return sendJson(
+        res,
+        200,
+        {
+          authenticated: true,
+          token: activeToken,
+          user: userObj,
+          isPublic: auth.isPublic
+        },
+        { 'Set-Cookie': cookieHeader }
+      );
+    }
+
+    if (pathname === '/api/auth/register' && method === 'POST') {
+      const body = await readJsonBody(req);
+      const cleanName = String(body.username || body.name || '').trim();
+      const rawPassword = String(body.password || body.pin_code || '');
+      const avatarColor = String(body.avatar_color || 'amber').trim() || 'amber';
+      const email = String(body.email || '').trim();
+
+      if (cleanName.length < 2 || cleanName.length > 40) {
+        return sendJson(res, 400, { error: 'Username must be between 2 and 40 characters.' });
+      }
+      if (rawPassword.length < 4) {
+        return sendJson(res, 400, { error: 'Password must be at least 4 characters long to protect your vault.' });
+      }
+
+      const existing = db.prepare(`SELECT id FROM users WHERE LOWER(name) = LOWER(?)`).get(cleanName);
+      if (existing) {
+        return sendJson(res, 400, { error: 'That username is already registered. Please sign in or pick another username.' });
+      }
+
+      const { hash, salt } = hashPassword(rawPassword);
+      const ins = db
+        .prepare(`INSERT INTO users (name, email, avatar_color, password_hash, password_salt, pin_code) VALUES (?, ?, ?, ?, ?, '')`)
+        .run(cleanName, email, avatarColor, hash, salt);
+      const newUserId = Number(ins.lastInsertRowid);
+      const token = createSession(newUserId);
+      const userObj = getSingleUserWithStats(newUserId);
+      const cookieHeader = `aethervault_session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=7776000${auth.isPublic ? '; Secure' : ''}`;
+
+      return sendJson(
+        res,
+        201,
+        {
+          authenticated: true,
+          token,
+          user: userObj,
+          isPublic: auth.isPublic
+        },
+        { 'Set-Cookie': cookieHeader }
+      );
+    }
+
+    if (pathname === '/api/auth/login' && method === 'POST') {
+      const body = await readJsonBody(req);
+      const cleanName = String(body.username || body.name || '').trim();
+      const rawPassword = String(body.password || body.pin_code || '');
+
+      if (!cleanName) {
+        return sendJson(res, 400, { error: 'Please enter your username.' });
+      }
+
+      const userRow = db.prepare(`SELECT * FROM users WHERE LOWER(name) = LOWER(?)`).get(cleanName);
+      if (!userRow) {
+        return sendJson(res, 401, { error: 'Invalid username or password.' });
+      }
+
+      const hasPassword = Boolean(
+        (userRow.password_hash && String(userRow.password_hash).length > 0) ||
+          (userRow.pin_code && String(userRow.pin_code).trim().length > 0)
+      );
+
+      if (hasPassword) {
+        const valid = verifyPassword(rawPassword, userRow.password_hash, userRow.password_salt, userRow.pin_code);
+        if (!valid) {
+          return sendJson(res, 401, { error: 'Invalid username or password.' });
+        }
+        // Automatically upgrade legacy pin_code to salted scrypt password_hash
+        if (!userRow.password_hash && userRow.pin_code) {
+          const { hash, salt } = hashPassword(rawPassword);
+          db.prepare(`UPDATE users SET password_hash = ?, password_salt = ?, pin_code = '' WHERE id = ?`).run(
+            hash,
+            salt,
+            userRow.id
+          );
+        }
+      } else {
+        // Legacy local profile without a password yet: if user entered a password (>= 4 chars), lock the account with it now
+        if (auth.isPublic && rawPassword.length < 4) {
+          return sendJson(res, 400, { error: 'Please enter a password (at least 4 characters) to secure your account.' });
+        }
+        if (rawPassword.length >= 4) {
+          const { hash, salt } = hashPassword(rawPassword);
+          db.prepare(`UPDATE users SET password_hash = ?, password_salt = ?, pin_code = '' WHERE id = ?`).run(
+            hash,
+            salt,
+            userRow.id
+          );
+        }
+      }
+
+      const token = createSession(Number(userRow.id));
+      const userObj = getSingleUserWithStats(Number(userRow.id));
+      const cookieHeader = `aethervault_session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=7776000${auth.isPublic ? '; Secure' : ''}`;
+
+      return sendJson(
+        res,
+        200,
+        {
+          authenticated: true,
+          token,
+          user: userObj,
+          isPublic: auth.isPublic
+        },
+        { 'Set-Cookie': cookieHeader }
+      );
+    }
+
+    if (pathname === '/api/auth/logout' && method === 'POST') {
+      const token = extractSessionToken(req);
+      if (token) {
+        db.prepare(`DELETE FROM user_sessions WHERE token = ?`).run(token);
+      }
+      const clearCookie = `aethervault_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
+      return sendJson(res, 200, { ok: true }, { 'Set-Cookie': clearCookie });
+    }
+
+    if (pathname === '/api/auth/password' && method === 'POST') {
+      if (!auth.authenticated || !auth.userId) {
+        return sendJson(res, 401, { error: 'Please sign in first.', requireAuth: true });
+      }
+      const body = await readJsonBody(req);
+      const currentPassword = String(body.currentPassword || '');
+      const newPassword = String(body.newPassword || '');
+      if (newPassword.length < 4) {
+        return sendJson(res, 400, { error: 'New password must be at least 4 characters long.' });
+      }
+
+      const userRow = db.prepare(`SELECT * FROM users WHERE id = ?`).get(auth.userId);
+      if (!userRow) {
+        return sendJson(res, 404, { error: 'Account not found.' });
+      }
+
+      const hasPassword = Boolean(
+        (userRow.password_hash && String(userRow.password_hash).length > 0) ||
+          (userRow.pin_code && String(userRow.pin_code).trim().length > 0)
+      );
+      if (hasPassword) {
+        const valid = verifyPassword(currentPassword, userRow.password_hash, userRow.password_salt, userRow.pin_code);
+        if (!valid) {
+          return sendJson(res, 401, { error: 'Current password is incorrect.' });
+        }
+      }
+
+      const { hash, salt } = hashPassword(newPassword);
+      db.prepare(`UPDATE users SET password_hash = ?, password_salt = ?, pin_code = '' WHERE id = ?`).run(
+        hash,
+        salt,
+        auth.userId
+      );
+
+      // Revoke all other session tokens for this user
+      if (auth.token) {
+        db.prepare(`DELETE FROM user_sessions WHERE user_id = ? AND token != ?`).run(auth.userId, auth.token);
+      }
+      return sendJson(res, 200, {
+        ok: true,
+        user: getSingleUserWithStats(auth.userId),
+        message: 'Your vault password has been updated.'
+      });
+    }
+
+    // 0a. Local LAN Network & Desktop Endpoints (disabled on public multi-tenant hosts)
+    if (pathname === '/api/network-info' && method === 'GET') {
+      if (auth.isPublic) {
+        return sendJson(res, 200, {
+          port: PORT,
+          hostname: 'aether-vault.com',
+          localUrl: 'https://aether-vault.com',
+          lanIps: [],
+          lanUrls: ['https://aether-vault.com', 'https://aether-vault.net'],
+          primaryLanUrl: 'https://aether-vault.com'
+        });
+      }
+      return sendJson(res, 200, getLanNetworkInfo());
+    }
+
+    if (pathname === '/api/network-info/allow-firewall' && method === 'POST') {
+      if (auth.isPublic) {
+        return sendJson(res, 403, { error: 'Not available on public web server.' });
+      }
+      const { exec } = await import('node:child_process');
+      await new Promise(resolve => {
+        exec(
+          `netsh advfirewall firewall add rule name="AetherVault MTG Port ${PORT}" dir=in action=allow protocol=TCP localport=${PORT}`,
+          () => resolve()
+        );
+      });
+      return sendJson(res, 200, {
+        ok: true,
+        message: `Added Windows Firewall allow rule for TCP port ${PORT} (if running with permissions).`
+      });
+    }
+
+    if ((pathname === '/api/standalone/create-shortcut' || pathname === '/api/standalone/open-folder') && method === 'POST') {
+      if (auth.isPublic) {
+        return sendJson(res, 403, { error: 'Desktop shortcuts are only available when running locally on Windows.' });
+      }
+      if (pathname === '/api/standalone/create-shortcut') {
+        const rootDir = path.resolve(__dirname, '..');
+        const batPath = path.join(rootDir, 'Start-AetherVault.bat');
+        const { execFile } = await import('node:child_process');
+        await new Promise((resolve, reject) => {
+          const psScript = `
+            $WshShell = New-Object -ComObject WScript.Shell
+            $Desktop = [Environment]::GetFolderPath('Desktop')
+            $Shortcut = $WshShell.CreateShortcut((Join-Path $Desktop 'AetherVault MTG Deckbuilder.lnk'))
+            $Shortcut.TargetPath = '${batPath.replace(/'/g, "''")}'
+            $Shortcut.WorkingDirectory = '${rootDir.replace(/'/g, "''")}'
+            $Shortcut.Description = 'Launch AetherVault MTG Inventory & Deck Builder locally'
+            $Shortcut.IconLocation = 'shell32.dll,43'
+            $Shortcut.Save()
+          `;
+          execFile('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', psScript], err => {
+            if (err) reject(err);
+            else resolve();
+          });
+        });
+        return sendJson(res, 200, {
+          ok: true,
+          message: 'Created "AetherVault MTG Deckbuilder" shortcut on your Windows Desktop!'
+        });
+      }
+      const rootDir = path.resolve(__dirname, '..');
+      const { exec } = await import('node:child_process');
+      if (process.platform === 'win32') {
+        exec(`explorer.exe "${rootDir}"`);
+      }
+      return sendJson(res, 200, { ok: true, folder: rootDir });
+    }
+
+    // All remaining routes require an authenticated user session
+    if (!auth.authenticated || !auth.userId) {
+      return sendJson(res, 401, {
+        error: 'Authentication required. Please sign in to access your personal AetherVault.',
+        requireAuth: true
+      });
+    }
+
+    const userId = auth.userId;
+
+    // 0b. Multi-User Profile Endpoints: GET & POST /api/users, PATCH & DELETE /api/users/:id
+    if (pathname === '/api/users' && method === 'GET') {
+      // On public domains (aether-vault.com / aether-vault.net), only return the authenticated user's own profile!
+      const visibleUsers = auth.isPublic ? getAllUsersWithStats(userId) : getAllUsersWithStats();
+      return sendJson(res, 200, { users: visibleUsers });
+    }
+
+    if (pathname === '/api/users' && method === 'POST') {
+      const body = await readJsonBody(req);
+      const cleanName = String(body.name || body.username || '').trim();
+      const avatarColor = String(body.avatar_color || 'sky').trim() || 'sky';
+      const rawPassword = String(body.password || body.pin_code || '').trim();
+      if (!cleanName) {
+        return sendJson(res, 400, { error: 'Profile name is required.' });
+      }
+      if (auth.isPublic && rawPassword.length < 4) {
+        return sendJson(res, 400, { error: 'A password of at least 4 characters is required.' });
+      }
+      const existing = db.prepare(`SELECT id FROM users WHERE LOWER(name) = LOWER(?)`).get(cleanName);
+      if (existing) {
+        return sendJson(res, 400, { error: 'An account with that name already exists.' });
+      }
+      let hash = '';
+      let salt = '';
+      if (rawPassword.length > 0) {
+        const hashed = hashPassword(rawPassword);
+        hash = hashed.hash;
+        salt = hashed.salt;
+      }
+      const ins = db
+        .prepare(`INSERT INTO users (name, avatar_color, password_hash, password_salt, pin_code) VALUES (?, ?, ?, ?, '')`)
+        .run(cleanName, avatarColor, hash, salt);
+      const newId = Number(ins.lastInsertRowid);
+      const token = createSession(newId);
+      const created = getSingleUserWithStats(newId);
+      const visibleUsers = auth.isPublic ? [created] : getAllUsersWithStats();
+      return sendJson(res, 201, { user: created, token, users: visibleUsers });
+    }
+
+    const userItemMatch = pathname.match(/^\/api\/users\/(\d+)$/);
+    if (userItemMatch) {
+      const targetUserId = Number(userItemMatch[1]);
+      // Strict ownership check: a user can only modify or delete their OWN account!
+      if (targetUserId !== userId) {
+        return sendJson(res, 403, { error: 'You can only modify your own AetherVault account.' });
+      }
+      const existingUser = db.prepare(`SELECT * FROM users WHERE id = ?`).get(targetUserId);
+      if (!existingUser) {
+        return sendJson(res, 404, { error: 'User profile not found.' });
+      }
+
+      if (method === 'PATCH') {
+        const body = await readJsonBody(req);
+        const nextName = body.name !== undefined ? String(body.name).trim() || existingUser.name : existingUser.name;
+        if (nextName.toLowerCase() !== existingUser.name.toLowerCase()) {
+          const conflict = db.prepare(`SELECT id FROM users WHERE LOWER(name) = LOWER(?) AND id != ?`).get(nextName, targetUserId);
+          if (conflict) {
+            return sendJson(res, 400, { error: 'That username is already taken.' });
+          }
+        }
+        const nextColor = body.avatar_color ?? existingUser.avatar_color;
+        db.prepare(`UPDATE users SET name = ?, avatar_color = ? WHERE id = ?`).run(
+          nextName,
+          nextColor,
+          targetUserId
+        );
+        const updatedUser = getSingleUserWithStats(targetUserId);
+        const visibleUsers = auth.isPublic ? [updatedUser] : getAllUsersWithStats();
+        return sendJson(res, 200, { user: updatedUser, users: visibleUsers });
+      }
+
+      if (method === 'DELETE') {
+        if (!auth.isPublic && targetUserId === 1) {
+          return sendJson(res, 400, { error: 'Cannot delete the Primary Owner profile (#1) on local desktop.' });
+        }
+        const userDecks = db.prepare(`SELECT id FROM decks WHERE COALESCE(user_id, 1) = ?`).all(targetUserId);
+        db.exec('BEGIN TRANSACTION');
+        try {
+          for (const d of userDecks) {
+            db.prepare(`DELETE FROM deck_cards WHERE deck_id = ?`).run(d.id);
+          }
+          db.prepare(`DELETE FROM decks WHERE COALESCE(user_id, 1) = ?`).run(targetUserId);
+          db.prepare(`DELETE FROM deck_folders WHERE COALESCE(user_id, 1) = ?`).run(targetUserId);
+          db.prepare(`DELETE FROM inventory WHERE COALESCE(user_id, 1) = ?`).run(targetUserId);
+          db.prepare(`DELETE FROM user_sessions WHERE user_id = ?`).run(targetUserId);
+          db.prepare(`DELETE FROM users WHERE id = ?`).run(targetUserId);
+          db.exec('COMMIT');
+        } catch (err) {
+          db.exec('ROLLBACK');
+          throw err;
+        }
+        return sendJson(res, 200, { ok: true, users: auth.isPublic ? [] : getAllUsersWithStats() });
+      }
+    }
+
+    // 1. GET /api/dashboard
+    if (pathname === '/api/dashboard' && method === 'GET') {
+      const items = getAllInventoryEnriched(userId);
+      let totalQty = 0;
+      let totalTcg = 0;
+      let totalCkRetail = 0;
+      let totalCkBuylist = 0;
+      let totalCostBasis = 0;
+
+      const byLocation = {};
+      const byRarity = { mythic: 0, rare: 0, uncommon: 0, common: 0 };
+      const byColor = { W: 0, U: 0, B: 0, R: 0, G: 0, M: 0, C: 0 };
+
+      for (const item of items) {
+        totalQty += item.quantity;
+        totalTcg += item.total_tcg;
+        totalCkRetail += item.total_ck_retail;
+        totalCkBuylist += item.total_ck_buylist;
+        if (item.purchase_price) {
+          totalCostBasis += Number(item.purchase_price) * item.quantity;
+        }
+        const loc = item.location || 'Main Binder';
+        if (!byLocation[loc]) {
+          byLocation[loc] = { location: loc, count: 0, valueTcg: 0, valueCkRetail: 0 };
+        }
+        byLocation[loc].count += item.quantity;
+        byLocation[loc].valueTcg = Math.round((byLocation[loc].valueTcg + item.total_tcg) * 100) / 100;
+        byLocation[loc].valueCkRetail = Math.round((byLocation[loc].valueCkRetail + item.total_ck_retail) * 100) / 100;
+
+        const rar = (item.rarity || 'common').toLowerCase();
+        if (byRarity[rar] !== undefined) byRarity[rar] += item.quantity;
+
+        const cols = item.colors || [];
+        if (cols.length === 0) byColor.C += item.quantity;
+        else if (cols.length > 1) byColor.M += item.quantity;
+        else if (byColor[cols[0]] !== undefined) byColor[cols[0]] += item.quantity;
+      }
+
+      const topCards = [...items]
+        .sort((a, b) => b.unit_tcg - a.unit_tcg)
+        .slice(0, 8);
+
+      const recentCards = items.slice(0, 16);
+
+      const syncRows = db.prepare(`SELECT key, value, updated_at FROM sync_meta`).all();
+      const syncMeta = Object.fromEntries(syncRows.map(r => [r.key, { value: r.value, updated_at: r.updated_at }]));
+      const ckCount = db.prepare(`SELECT COUNT(*) as cnt FROM ck_prices`).get()?.cnt || 0;
+
+      return sendJson(res, 200, {
+        summary: {
+          totalCards: totalQty,
+          uniqueEntries: items.length,
+          totalTcg: Math.round(totalTcg * 100) / 100,
+          totalCkRetail: Math.round(totalCkRetail * 100) / 100,
+          totalCkBuylist: Math.round(totalCkBuylist * 100) / 100,
+          totalCostBasis: Math.round(totalCostBasis * 100) / 100
+        },
+        topCards,
+        recentCards,
+        locations: Object.values(byLocation).sort((a, b) => b.valueTcg - a.valueTcg),
+        byRarity,
+        byColor,
+        syncMeta: {
+          ...syncMeta,
+          ckIndexedCount: ckCount
+        }
+      });
+    }
+
+    // 2. GET /api/inventory
+    if (pathname === '/api/inventory' && method === 'GET') {
+      const items = getAllInventoryEnriched(userId);
+      return sendJson(res, 200, { items });
+    }
+
+    // 3. POST /api/inventory
+    if (pathname === '/api/inventory' && method === 'POST') {
+      const body = await readJsonBody(req);
+      const { card, quantity = 1, finish = 'nonfoil', condition = 'NM', language = 'EN', location = 'Main Binder', purchase_price = null, notes = '' } = body;
+
+      if (!card || !card.scryfall_id || !card.name) {
+        return sendJson(res, 400, { error: 'Valid card object with scryfall_id and name is required.' });
+      }
+
+      const existingCache = db.prepare(`SELECT scryfall_id FROM cards_cache WHERE scryfall_id = ?`).get(card.scryfall_id);
+      if (!existingCache || card.type_line) {
+        upsertCardCache(card);
+      }
+
+      // Check if an identical inventory row exists for this user (including matching notes so deck-reserved cards stay distinct)
+      const cleanNotes = String(notes || '').trim();
+      const existing = db.prepare(`
+        SELECT id, quantity FROM inventory
+        WHERE COALESCE(user_id, 1) = ? AND scryfall_id = ? AND finish = ? AND condition = ? AND language = ? AND location = ? AND COALESCE(notes, '') = ?
+      `).get(userId, card.scryfall_id, finish, condition, language, location, cleanNotes);
+
+      if (existing) {
+        const newQty = existing.quantity + Number(quantity || 1);
+        db.prepare(`UPDATE inventory SET quantity = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(newQty, existing.id);
+      } else {
+        db.prepare(`
+          INSERT INTO inventory (user_id, scryfall_id, name, set_code, collector_number, quantity, finish, condition, language, location, purchase_price, notes)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          userId,
+          card.scryfall_id,
+          card.name,
+          card.set_code || '',
+          card.collector_number || '',
+          Math.max(1, Number(quantity || 1)),
+          finish,
+          condition,
+          language,
+          location,
+          purchase_price !== null && purchase_price !== '' ? Number(purchase_price) : null,
+          cleanNotes
+        );
+      }
+
+      return sendJson(res, 200, { items: getAllInventoryEnriched(userId) });
+    }
+
+    // 4. POST /api/inventory/bulk-delete
+    if (pathname === '/api/inventory/bulk-delete' && method === 'POST') {
+      const body = await readJsonBody(req);
+      const { ids = [], location = null, clearAll = false } = body;
+
+      if (clearAll) {
+        db.prepare(`DELETE FROM inventory WHERE COALESCE(user_id, 1) = ?`).run(userId);
+      } else if (location && location !== 'ALL') {
+        db.prepare(`DELETE FROM inventory WHERE COALESCE(user_id, 1) = ? AND location = ?`).run(userId, location);
+      } else if (Array.isArray(ids) && ids.length > 0) {
+        const delStmt = db.prepare(`DELETE FROM inventory WHERE id = ? AND COALESCE(user_id, 1) = ?`);
+        db.exec('BEGIN TRANSACTION');
+        try {
+          for (const rawId of ids) {
+            delStmt.run(Number(rawId), userId);
+          }
+          db.exec('COMMIT');
+        } catch (err) {
+          db.exec('ROLLBACK');
+          throw err;
+        }
+      }
+
+      return sendJson(res, 200, { items: getAllInventoryEnriched(userId) });
+    }
+
+    // 4b. PATCH & DELETE /api/inventory/:id
+    const invMatch = pathname.match(/^\/api\/inventory\/(\d+)$/);
+    if (invMatch) {
+      const id = Number(invMatch[1]);
+      if (method === 'DELETE') {
+        db.prepare(`DELETE FROM inventory WHERE id = ? AND COALESCE(user_id, 1) = ?`).run(id, userId);
+        return sendJson(res, 200, { items: getAllInventoryEnriched(userId) });
+      }
+      if (method === 'PATCH') {
+        const body = await readJsonBody(req);
+        const existing = db.prepare(`SELECT * FROM inventory WHERE id = ? AND COALESCE(user_id, 1) = ?`).get(id, userId);
+        if (!existing) return sendJson(res, 404, { error: 'Inventory item not found' });
+
+        if (body.quantity !== undefined && Number(body.quantity) <= 0) {
+          db.prepare(`DELETE FROM inventory WHERE id = ? AND COALESCE(user_id, 1) = ?`).run(id, userId);
+          return sendJson(res, 200, { items: getAllInventoryEnriched(userId) });
+        }
+
+        if (body.newCard) {
+          upsertCardCache(body.newCard);
+        }
+
+        const nextScryfallId = body.newCard?.scryfall_id ?? body.scryfall_id ?? existing.scryfall_id;
+        const nextSetCode = body.newCard?.set_code ?? body.set_code ?? existing.set_code;
+        const nextCollNum = body.newCard?.collector_number ?? body.collector_number ?? existing.collector_number;
+
+        db.prepare(`
+          UPDATE inventory
+          SET
+            scryfall_id = ?,
+            set_code = ?,
+            collector_number = ?,
+            quantity = ?,
+            finish = ?,
+            condition = ?,
+            language = ?,
+            location = ?,
+            purchase_price = ?,
+            notes = ?,
+            updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `).run(
+          nextScryfallId,
+          nextSetCode,
+          nextCollNum,
+          body.quantity !== undefined ? Number(body.quantity) : existing.quantity,
+          body.finish ?? existing.finish,
+          body.condition ?? existing.condition,
+          body.language ?? existing.language,
+          body.location ?? existing.location,
+          body.purchase_price !== undefined ? (body.purchase_price === null || body.purchase_price === '' ? null : Number(body.purchase_price)) : existing.purchase_price,
+          body.notes !== undefined ? body.notes : existing.notes,
+          id
+        );
+
+        return sendJson(res, 200, { items: getAllInventoryEnriched(userId) });
+      }
+    }
+
+    // 5. GET /api/scryfall/search
+    if (pathname === '/api/scryfall/search' && method === 'GET') {
+      const q = url.searchParams.get('q') || '';
+      const page = Number(url.searchParams.get('page') || 1);
+      const result = await searchScryfallCards(q, page);
+
+      // Attach owned counts from this user's inventory
+      const invCounts = db.prepare(`SELECT LOWER(name) as lname, SUM(quantity) as qty FROM inventory WHERE COALESCE(user_id, 1) = ? GROUP BY LOWER(name)`).all(userId);
+      const ownedMap = new Map(invCounts.map(r => [r.lname, r.qty]));
+
+      const enriched = result.data.map(c => ({
+        ...c,
+        owned_qty: ownedMap.get(c.name.toLowerCase()) || 0
+      }));
+
+      return sendJson(res, 200, { ...result, data: enriched });
+    }
+
+    // 6. GET /api/scryfall/printings
+    if (pathname === '/api/scryfall/printings' && method === 'GET') {
+      const name = url.searchParams.get('name') || '';
+      if (!name) return sendJson(res, 400, { error: 'Card name is required' });
+      const printings = await getCardPrintings(name);
+      return sendJson(res, 200, { data: printings });
+    }
+
+    // 7. POST /api/prices/refresh
+    if (pathname === '/api/prices/refresh' && method === 'POST') {
+      const result = await refreshCollectionPrices(userId);
+      return sendJson(res, 200, result);
+    }
+
+    // 8. POST /api/prices/sync-cardkingdom
+    if (pathname === '/api/prices/sync-cardkingdom' && method === 'POST') {
+      const result = await syncCardKingdomPricelist();
+      return sendJson(res, 200, result);
+    }
+
+    // 9. GET & POST /api/decks
+    if (pathname === '/api/decks' && method === 'GET') {
+      const cachedDecks = cachedDecksByUser.get(userId);
+      if (cachedDecks && cachedDecks.version === dataCacheVersion) {
+        return sendJson(res, 200, cachedDecks.payload);
+      }
+
+      const decks = db.prepare(`SELECT * FROM decks WHERE COALESCE(user_id, 1) = ? ORDER BY updated_at DESC, id DESC`).all(userId);
+      const folderRows = db.prepare(`SELECT name FROM deck_folders WHERE COALESCE(user_id, 1) = ? ORDER BY name COLLATE NOCASE ASC`).all(userId);
+      const invRows = db.prepare(`SELECT scryfall_id, name, quantity, finish, location, notes FROM inventory WHERE COALESCE(user_id, 1) = ?`).all(userId);
+      const allUsages = getAllActiveDeckUsages(userId);
+
+      const folderSet = new Set(folderRows.map(r => r.name));
+      for (const d of decks) {
+        if (d.folder && d.folder.trim()) {
+          folderSet.add(d.folder.trim());
+        }
+      }
+
+      const enrichedDecks = decks.map(d => {
+        const cards = getDeckCardsEnriched(d.id);
+        const analysis = analyzeAndValidateDeck(
+          {
+            ...d,
+            color_identity: safeParse(d.color_identity, []),
+            tags: safeParse(d.tags, [])
+          },
+          cards,
+          invRows,
+          allUsages
+        );
+        return {
+          ...d,
+          folder: (d.folder || 'Uncategorized').trim() || 'Uncategorized',
+          color_identity: analysis.stats.commanderColorIdentity.length > 0
+            ? analysis.stats.commanderColorIdentity
+            : safeParse(d.color_identity, []),
+          tags: safeParse(d.tags, []),
+          counts: analysis.counts,
+          ownership: analysis.ownership,
+          valuation: analysis.valuation,
+          isValid: analysis.isValid,
+          issueCount: analysis.issues.length
+        };
+      });
+
+      const payload = {
+        decks: enrichedDecks,
+        folders: Array.from(folderSet).sort((a, b) => a.localeCompare(b))
+      };
+      cachedDecksByUser.set(userId, { version: dataCacheVersion, payload });
+      return sendJson(res, 200, payload);
+    }
+
+    if (pathname === '/api/decks' && method === 'POST') {
+      const body = await readJsonBody(req);
+      const {
+        name = 'New Deck',
+        format = 'commander',
+        folder = 'Uncategorized',
+        description = '',
+        commanderCard = null,
+        tags = []
+      } = body;
+
+      const cleanFolder = (folder || 'Uncategorized').trim() || 'Uncategorized';
+      if (cleanFolder !== 'Uncategorized') {
+        db.prepare(`INSERT OR IGNORE INTO deck_folders (name, user_id) VALUES (?, ?)`).run(cleanFolder, userId);
+      }
+
+      let commanderId = null;
+      let coverImage = null;
+      let colorIdentity = [];
+
+      if (commanderCard && commanderCard.scryfall_id) {
+        upsertCardCache(commanderCard);
+        commanderId = commanderCard.scryfall_id;
+        coverImage = commanderCard.image_art_crop || commanderCard.image_normal || null;
+        colorIdentity = commanderCard.color_identity || [];
+      }
+
+      const resInsert = db.prepare(`
+        INSERT INTO decks (user_id, name, format, folder, description, commander_scryfall_id, cover_image, color_identity, tags)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        userId,
+        name.trim() || 'Untitled Deck',
+        format,
+        cleanFolder,
+        description,
+        commanderId,
+        coverImage,
+        JSON.stringify(colorIdentity),
+        JSON.stringify(tags)
+      );
+
+      const deckId = Number(resInsert.lastInsertRowid);
+      if (commanderCard && commanderCard.scryfall_id) {
+        db.prepare(`
+          INSERT INTO deck_cards (deck_id, scryfall_id, name, quantity, board, finish)
+          VALUES (?, ?, ?, 1, 'commander', ?)
+        `).run(deckId, commanderCard.scryfall_id, commanderCard.name, commanderCard.finish || 'nonfoil');
+      }
+
+      return sendJson(res, 201, { deckId });
+    }
+
+    // 9a. POST & DELETE /api/decks/folders
+    if (pathname === '/api/decks/folders') {
+      if (method === 'POST') {
+        const body = await readJsonBody(req);
+        const { name = '', oldName = '' } = body;
+        const cleanName = (name || '').trim();
+        if (!cleanName) return sendJson(res, 400, { error: 'Folder name required' });
+
+        if (oldName && oldName.trim() && oldName.trim() !== cleanName) {
+          db.prepare(`DELETE FROM deck_folders WHERE name = ? AND COALESCE(user_id, 1) = ?`).run(oldName.trim(), userId);
+          db.prepare(`INSERT OR IGNORE INTO deck_folders (name, user_id) VALUES (?, ?)`).run(cleanName, userId);
+          db.prepare(`UPDATE decks SET folder = ?, updated_at = CURRENT_TIMESTAMP WHERE folder = ? AND COALESCE(user_id, 1) = ?`).run(
+            cleanName,
+            oldName.trim(),
+            userId
+          );
+        } else {
+          db.prepare(`INSERT OR IGNORE INTO deck_folders (name, user_id) VALUES (?, ?)`).run(cleanName, userId);
+        }
+        return sendJson(res, 200, { ok: true, folder: cleanName });
+      }
+
+      if (method === 'DELETE') {
+        const body = await readJsonBody(req);
+        const { name = '', deleteDecksInside = false } = body;
+        const cleanName = (name || '').trim();
+        if (!cleanName) return sendJson(res, 400, { error: 'Folder name required' });
+
+        db.prepare(`DELETE FROM deck_folders WHERE name = ? AND COALESCE(user_id, 1) = ?`).run(cleanName, userId);
+        if (deleteDecksInside) {
+          const decksInFolder = db.prepare(`SELECT id FROM decks WHERE folder = ? AND COALESCE(user_id, 1) = ?`).all(cleanName, userId);
+          for (const d of decksInFolder) {
+            db.prepare(`DELETE FROM deck_cards WHERE deck_id = ?`).run(d.id);
+          }
+          db.prepare(`DELETE FROM decks WHERE folder = ? AND COALESCE(user_id, 1) = ?`).run(cleanName, userId);
+        } else {
+          db.prepare(`UPDATE decks SET folder = 'Uncategorized', updated_at = CURRENT_TIMESTAMP WHERE folder = ? AND COALESCE(user_id, 1) = ?`).run(
+            cleanName,
+            userId
+          );
+        }
+        return sendJson(res, 200, { ok: true });
+      }
+    }
+
+    // 9b. POST /api/decks/bulk-move
+    if (pathname === '/api/decks/bulk-move' && method === 'POST') {
+      const body = await readJsonBody(req);
+      const { ids = [], folder = 'Uncategorized' } = body;
+      const cleanFolder = (folder || 'Uncategorized').trim() || 'Uncategorized';
+      if (cleanFolder !== 'Uncategorized') {
+        db.prepare(`INSERT OR IGNORE INTO deck_folders (name, user_id) VALUES (?, ?)`).run(cleanFolder, userId);
+      }
+
+      if (Array.isArray(ids) && ids.length > 0) {
+        const stmt = db.prepare(`UPDATE decks SET folder = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND COALESCE(user_id, 1) = ?`);
+        db.exec('BEGIN TRANSACTION');
+        try {
+          for (const rawId of ids) {
+            stmt.run(cleanFolder, Number(rawId), userId);
+          }
+          db.exec('COMMIT');
+        } catch (err) {
+          db.exec('ROLLBACK');
+          throw err;
+        }
+      }
+      return sendJson(res, 200, { ok: true, folder: cleanFolder });
+    }
+
+    // 9c. POST /api/decks/bulk-delete
+    if (pathname === '/api/decks/bulk-delete' && method === 'POST') {
+      const body = await readJsonBody(req);
+      const { ids = [], clearAll = false } = body;
+
+      if (clearAll) {
+        const userDecks = db.prepare(`SELECT id FROM decks WHERE COALESCE(user_id, 1) = ?`).all(userId);
+        for (const d of userDecks) {
+          db.prepare(`DELETE FROM deck_cards WHERE deck_id = ?`).run(d.id);
+        }
+        db.prepare(`DELETE FROM decks WHERE COALESCE(user_id, 1) = ?`).run(userId);
+      } else if (Array.isArray(ids) && ids.length > 0) {
+        const delCardsStmt = db.prepare(`DELETE FROM deck_cards WHERE deck_id = ?`);
+        const delDeckStmt = db.prepare(`DELETE FROM decks WHERE id = ? AND COALESCE(user_id, 1) = ?`);
+        db.exec('BEGIN TRANSACTION');
+        try {
+          for (const rawId of ids) {
+            const did = Number(rawId);
+            if (!getOwnedDeck(did, userId)) continue;
+            delCardsStmt.run(did);
+            delDeckStmt.run(did, userId);
+          }
+          db.exec('COMMIT');
+        } catch (err) {
+          db.exec('ROLLBACK');
+          throw err;
+        }
+      }
+
+      return sendJson(res, 200, { ok: true });
+    }
+
+    // 9d. POST /api/decks/mark-bought
+    if (pathname === '/api/decks/mark-bought' && method === 'POST') {
+      const body = await readJsonBody(req);
+      const { deckId = null, items = [] } = body;
+      if (!Array.isArray(items) || items.length === 0) {
+        return sendJson(res, 400, { error: 'No items provided to mark bought.' });
+      }
+      if (deckId && !getOwnedDeck(deckId, userId)) {
+        return sendJson(res, 404, { error: 'Deck not found in your vault.' });
+      }
+
+      const selectCacheById = db.prepare(`SELECT * FROM cards_cache WHERE scryfall_id = ?`);
+      const selectCacheByName = db.prepare(`SELECT * FROM cards_cache WHERE LOWER(name) = LOWER(?) LIMIT 1`);
+      const selectDeckCardById = db.prepare(`SELECT * FROM deck_cards WHERE id = ?`);
+      const selectExistingInv = db.prepare(`
+        SELECT id, quantity FROM inventory
+        WHERE COALESCE(user_id, 1) = ? AND scryfall_id = ? AND finish = ? AND condition = ? AND language = ? AND location = ? AND COALESCE(notes, '') = ?
+      `);
+      const updateInvQty = db.prepare(`UPDATE inventory SET quantity = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`);
+      const insertInvRow = db.prepare(`
+        INSERT INTO inventory (user_id, scryfall_id, name, set_code, collector_number, quantity, finish, condition, language, location, purchase_price, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'NM', 'EN', ?, NULL, ?)
+      `);
+
+      let acquiredCardsCount = 0;
+      db.exec('BEGIN TRANSACTION');
+      try {
+        for (const rawItem of items) {
+          const qty = Math.max(1, Number(rawItem.quantity ?? rawItem.missing_qty ?? 1));
+          const targetDeckId = rawItem.deck_id ?? deckId ?? null;
+          const finish = rawItem.finish || 'nonfoil';
+          const location = rawItem.location || 'Commander Box';
+          const notes = targetDeckId ? `Deck #${targetDeckId}` : String(rawItem.notes || '').trim();
+
+          let scryfallId = rawItem.scryfall_id || null;
+          let cardName = rawItem.name || '';
+          let setCode = rawItem.set_code || '';
+          let collectorNumber = rawItem.collector_number || '';
+
+          if (rawItem.deck_card_id) {
+            const dcRow = selectDeckCardById.get(Number(rawItem.deck_card_id));
+            if (dcRow) {
+              scryfallId = scryfallId || dcRow.scryfall_id;
+              cardName = cardName || dcRow.name;
+            }
+          }
+
+          let cached = scryfallId ? selectCacheById.get(scryfallId) : null;
+          if (!cached && cardName) {
+            cached = selectCacheByName.get(cardName);
+          }
+
+          if (cached) {
+            scryfallId = scryfallId || cached.scryfall_id;
+            cardName = cardName || cached.name;
+            setCode = setCode || cached.set_code || '';
+            collectorNumber = collectorNumber || cached.collector_number || '';
+          } else if (scryfallId && cardName) {
+            upsertCardCache({
+              scryfall_id: scryfallId,
+              name: cardName,
+              set_code: setCode,
+              collector_number: collectorNumber
+            });
+          }
+
+          if (!scryfallId || !cardName) continue;
+
+          const existing = selectExistingInv.get(userId, scryfallId, finish, 'NM', 'EN', location, notes);
+          if (existing) {
+            updateInvQty.run(existing.quantity + qty, existing.id);
+          } else {
+            insertInvRow.run(userId, scryfallId, cardName, setCode, collectorNumber, qty, finish, location, notes);
+          }
+          if (rawItem.deck_card_id) {
+            db.prepare(`UPDATE deck_cards SET force_buy = 0 WHERE id = ?`).run(Number(rawItem.deck_card_id));
+          } else if (targetDeckId && cardName) {
+            db.prepare(`UPDATE deck_cards SET force_buy = 0 WHERE deck_id = ? AND LOWER(name) = LOWER(?)`).run(
+              Number(targetDeckId),
+              cardName
+            );
+          }
+          acquiredCardsCount += qty;
+        }
+        db.exec('COMMIT');
+      } catch (err) {
+        db.exec('ROLLBACK');
+        throw err;
+      }
+
+      let deckDetail = null;
+      if (deckId) {
+        const numDeckId = Number(deckId);
+        const deckRow = db.prepare(`SELECT * FROM decks WHERE id = ?`).get(numDeckId);
+        if (deckRow) {
+          const cards = getDeckCardsEnriched(numDeckId);
+          const invRows = db.prepare(`SELECT scryfall_id, name, quantity, finish, location, notes FROM inventory WHERE COALESCE(user_id, 1) = ?`).all(userId);
+          const allUsages = getAllActiveDeckUsages(userId);
+          const deck = {
+            ...deckRow,
+            color_identity: safeParse(deckRow.color_identity, []),
+            tags: safeParse(deckRow.tags, [])
+          };
+          const analysis = analyzeAndValidateDeck(deck, cards, invRows, allUsages);
+          deckDetail = {
+            deck: {
+              ...deck,
+              color_identity: analysis.stats.commanderColorIdentity.length > 0
+                ? analysis.stats.commanderColorIdentity
+                : deck.color_identity
+            },
+            cards,
+            analysis
+          };
+        }
+      }
+
+      return sendJson(res, 200, {
+        ok: true,
+        acquiredCardsCount,
+        deckDetail
+      });
+    }
+
+    // 10. GET, PATCH, DELETE /api/decks/:id
+    const deckMatch = pathname.match(/^\/api\/decks\/(\d+)$/);
+    if (deckMatch) {
+      const deckId = Number(deckMatch[1]);
+      const deckRow = getOwnedDeck(deckId, userId);
+      if (!deckRow) return sendJson(res, 404, { error: 'Deck not found in your vault.' });
+
+      if (method === 'GET') {
+        const cards = getDeckCardsEnriched(deckId);
+        const invRows = db.prepare(`SELECT scryfall_id, name, quantity, finish, location, notes FROM inventory WHERE COALESCE(user_id, 1) = ?`).all(userId);
+        const allUsages = getAllActiveDeckUsages(userId);
+        const deck = {
+          ...deckRow,
+          color_identity: safeParse(deckRow.color_identity, []),
+          tags: safeParse(deckRow.tags, [])
+        };
+        const analysis = analyzeAndValidateDeck(deck, cards, invRows, allUsages);
+        return sendJson(res, 200, {
+          deck: {
+            ...deck,
+            color_identity: analysis.stats.commanderColorIdentity.length > 0
+              ? analysis.stats.commanderColorIdentity
+              : deck.color_identity
+          },
+          cards,
+          analysis
+        });
+      }
+
+      if (method === 'PATCH') {
+        const body = await readJsonBody(req);
+        const nextFolder = body.folder !== undefined
+          ? ((body.folder || 'Uncategorized').trim() || 'Uncategorized')
+          : (deckRow.folder || 'Uncategorized');
+        if (nextFolder !== 'Uncategorized') {
+          db.prepare(`INSERT OR IGNORE INTO deck_folders (name, user_id) VALUES (?, ?)`).run(nextFolder, userId);
+        }
+        db.prepare(`
+          UPDATE decks
+          SET
+            name = ?,
+            format = ?,
+            folder = ?,
+            description = ?,
+            cover_image = ?,
+            tags = ?,
+            updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND COALESCE(user_id, 1) = ?
+        `).run(
+          body.name ?? deckRow.name,
+          body.format ?? deckRow.format,
+          nextFolder,
+          body.description ?? deckRow.description,
+          body.cover_image ?? deckRow.cover_image,
+          body.tags ? JSON.stringify(body.tags) : deckRow.tags,
+          deckId,
+          userId
+        );
+        return sendJson(res, 200, { ok: true });
+      }
+
+      if (method === 'DELETE') {
+        db.prepare(`DELETE FROM deck_cards WHERE deck_id = ?`).run(deckId);
+        db.prepare(`DELETE FROM decks WHERE id = ? AND COALESCE(user_id, 1) = ?`).run(deckId, userId);
+        return sendJson(res, 200, { ok: true });
+      }
+    }
+
+    // 10b. POST /api/decks/:id/cards/bulk-delete
+    const deckBulkDelMatch = pathname.match(/^\/api\/decks\/(\d+)\/cards\/bulk-delete$/);
+    if (deckBulkDelMatch && method === 'POST') {
+      const deckId = Number(deckBulkDelMatch[1]);
+      if (!getOwnedDeck(deckId, userId)) {
+        return sendJson(res, 404, { error: 'Deck not found in your vault.' });
+      }
+      const body = await readJsonBody(req);
+      const { ids = [], clearAll = false } = body;
+
+      if (clearAll) {
+        db.prepare(`DELETE FROM deck_cards WHERE deck_id = ?`).run(deckId);
+      } else if (Array.isArray(ids) && ids.length > 0) {
+        const delStmt = db.prepare(`DELETE FROM deck_cards WHERE id = ? AND deck_id = ?`);
+        db.exec('BEGIN TRANSACTION');
+        try {
+          for (const rawId of ids) {
+            delStmt.run(Number(rawId), deckId);
+          }
+          db.exec('COMMIT');
+        } catch (err) {
+          db.exec('ROLLBACK');
+          throw err;
+        }
+      }
+      db.prepare(`UPDATE decks SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(deckId);
+      return sendJson(res, 200, { ok: true });
+    }
+
+    // 11. POST /api/decks/:id/cards
+    const deckCardsMatch = pathname.match(/^\/api\/decks\/(\d+)\/cards$/);
+    if (deckCardsMatch && method === 'POST') {
+      const deckId = Number(deckCardsMatch[1]);
+      const deckRow = getOwnedDeck(deckId, userId);
+      if (!deckRow) {
+        return sendJson(res, 404, { error: 'Deck not found in your vault.' });
+      }
+      const body = await readJsonBody(req);
+      const { card, quantity = 1, board = 'mainboard', finish = 'nonfoil', force_buy = false } = body;
+
+      if (!card || !card.scryfall_id || !card.name) {
+        return sendJson(res, 400, { error: 'Card with scryfall_id and name required' });
+      }
+
+      const existingCache = db.prepare(`SELECT scryfall_id FROM cards_cache WHERE scryfall_id = ?`).get(card.scryfall_id);
+      if (!existingCache || card.type_line) {
+        upsertCardCache(card);
+      }
+
+      const forceBuyVal = force_buy ? 1 : 0;
+      const isCommanderDeck = (deckRow?.format || 'commander').toLowerCase() === 'commander';
+      const isRelentless = isRelentlessCard(card.name, card.oracle_text || '');
+
+      let existing = db.prepare(`
+        SELECT id, quantity, board, COALESCE(force_buy, 0) as force_buy FROM deck_cards
+        WHERE deck_id = ? AND scryfall_id = ? AND board = ?
+      `).get(deckId, card.scryfall_id, board);
+
+      if (!existing && isCommanderDeck && !isRelentless) {
+        existing = db.prepare(`
+          SELECT id, quantity, board, COALESCE(force_buy, 0) as force_buy FROM deck_cards
+          WHERE deck_id = ? AND LOWER(name) = LOWER(?) AND board = ?
+        `).get(deckId, card.name, board);
+      }
+
+      // If setting as Commander (or adding a singleton card in a Commander deck that already exists in another zone like Mainboard/Creatures or Commander),
+      // MOVE the existing row instead of duplicating it across Creatures and Commander!
+      if (!existing && (board === 'commander' || (isCommanderDeck && !isRelentless))) {
+        existing = db.prepare(`
+          SELECT id, quantity, board, COALESCE(force_buy, 0) as force_buy FROM deck_cards
+          WHERE deck_id = ? AND (scryfall_id = ? OR LOWER(name) = LOWER(?))
+          ORDER BY CASE WHEN board = 'commander' THEN 0 ELSE 1 END ASC
+          LIMIT 1
+        `).get(deckId, card.scryfall_id, card.name);
+      }
+
+      if (existing) {
+        const targetBoardForRow =
+          board === 'commander'
+            ? 'commander'
+            : existing.board === 'commander' && isCommanderDeck
+              ? 'commander'
+              : board;
+
+        // Remove any other stray duplicate rows of this card name across other boards if moving to Commander
+        if (targetBoardForRow === 'commander') {
+          db.prepare(`
+            DELETE FROM deck_cards
+            WHERE deck_id = ? AND (scryfall_id = ? OR LOWER(name) = LOWER(?)) AND id != ?
+          `).run(deckId, card.scryfall_id, card.name, existing.id);
+        }
+
+        const isMovingToCommander = targetBoardForRow === 'commander';
+        const nextQty = isMovingToCommander
+          ? 1
+          : isCommanderDeck && !isRelentless && forceBuyVal === 1 && existing.force_buy === 0 && Number(quantity || 1) === 1
+            ? Math.max(1, existing.quantity)
+            : isCommanderDeck && !isRelentless && existing.board === 'commander'
+              ? 1
+              : existing.quantity + Number(quantity || 1);
+
+        db.prepare(`
+          UPDATE deck_cards SET scryfall_id = ?, quantity = ?, board = ?, finish = ?, force_buy = ? WHERE id = ?
+        `).run(
+          card.scryfall_id,
+          nextQty,
+          targetBoardForRow,
+          finish,
+          forceBuyVal ? 1 : existing.force_buy,
+          existing.id
+        );
+      } else {
+        db.prepare(`
+          INSERT INTO deck_cards (deck_id, scryfall_id, name, quantity, board, finish, force_buy)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          deckId,
+          card.scryfall_id,
+          card.name,
+          board === 'commander' ? 1 : Math.max(1, Number(quantity || 1)),
+          board,
+          finish,
+          forceBuyVal
+        );
+      }
+
+      // If added to commander board, update deck cover image & combined commander/background color identity
+      if (board === 'commander') {
+        const cover = card.image_art_crop || card.image_normal || null;
+        const cmdRows = db.prepare(`
+          SELECT c.color_identity
+          FROM deck_cards dc
+          LEFT JOIN cards_cache c ON c.scryfall_id = dc.scryfall_id
+          WHERE dc.deck_id = ? AND dc.board = 'commander'
+        `).all(deckId);
+        const combinedColors = new Set(Array.isArray(card.color_identity) ? card.color_identity : []);
+        for (const r of cmdRows) {
+          for (const col of safeParse(r.color_identity, [])) {
+            combinedColors.add(col);
+          }
+        }
+        const isBackground = (card.type_line || '').toLowerCase().includes('background');
+        db.prepare(`
+          UPDATE decks
+          SET
+            commander_scryfall_id = COALESCE(CASE WHEN ? THEN commander_scryfall_id ELSE ? END, ?),
+            cover_image = COALESCE(CASE WHEN ? THEN cover_image ELSE ? END, cover_image, ?),
+            color_identity = ?,
+            updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `).run(
+          isBackground ? 1 : 0,
+          card.scryfall_id,
+          card.scryfall_id,
+          isBackground ? 1 : 0,
+          cover,
+          cover,
+          JSON.stringify(Array.from(combinedColors)),
+          deckId
+        );
+      } else {
+        db.prepare(`UPDATE decks SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(deckId);
+      }
+
+      const updatedDeckRow = db.prepare(`SELECT * FROM decks WHERE id = ?`).get(deckId);
+      let deckDetail = null;
+      if (updatedDeckRow) {
+        const cards = getDeckCardsEnriched(deckId);
+        const invRows = db.prepare(`SELECT scryfall_id, name, quantity, finish, location, notes FROM inventory WHERE COALESCE(user_id, 1) = ?`).all(userId);
+        const allUsages = getAllActiveDeckUsages(userId);
+        const deckObj = {
+          ...updatedDeckRow,
+          color_identity: safeParse(updatedDeckRow.color_identity, []),
+          tags: safeParse(updatedDeckRow.tags, [])
+        };
+        const analysis = analyzeAndValidateDeck(deckObj, cards, invRows, allUsages);
+        deckDetail = {
+          deck: {
+            ...deckObj,
+            color_identity: analysis.stats.commanderColorIdentity.length > 0
+              ? analysis.stats.commanderColorIdentity
+              : deckObj.color_identity
+          },
+          cards,
+          analysis
+        };
+      }
+
+      return sendJson(res, 200, { ok: true, deckDetail });
+    }
+
+    // 12. PATCH & DELETE /api/decks/:id/cards/:cardRowId
+    const deckCardItemMatch = pathname.match(/^\/api\/decks\/(\d+)\/cards\/(\d+)$/);
+    if (deckCardItemMatch) {
+      const deckId = Number(deckCardItemMatch[1]);
+      const cardRowId = Number(deckCardItemMatch[2]);
+      if (!getOwnedDeck(deckId, userId)) {
+        return sendJson(res, 404, { error: 'Deck not found in your vault.' });
+      }
+
+      if (method === 'DELETE') {
+        db.prepare(`DELETE FROM deck_cards WHERE id = ? AND deck_id = ?`).run(cardRowId, deckId);
+        db.prepare(`UPDATE decks SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(deckId);
+        return sendJson(res, 200, { ok: true });
+      }
+
+      if (method === 'PATCH') {
+        const body = await readJsonBody(req);
+        const row = db.prepare(`SELECT * FROM deck_cards WHERE id = ? AND deck_id = ?`).get(cardRowId, deckId);
+        if (!row) return sendJson(res, 404, { error: 'Deck card not found' });
+
+        if (body.quantity !== undefined && Number(body.quantity) <= 0) {
+          db.prepare(`DELETE FROM deck_cards WHERE id = ?`).run(cardRowId);
+          db.prepare(`UPDATE decks SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(deckId);
+          return sendJson(res, 200, { ok: true });
+        }
+
+        if (body.newCard) {
+          upsertCardCache(body.newCard);
+        }
+
+        const nextBoard = body.board ?? row.board;
+        const nextScryfall = body.newCard?.scryfall_id ?? body.scryfall_id ?? row.scryfall_id;
+        const nextQty = body.quantity !== undefined ? Number(body.quantity) : row.quantity;
+        const nextFinish = body.finish ?? row.finish;
+        const nextForceBuy = body.force_buy !== undefined ? (body.force_buy ? 1 : 0) : (row.force_buy || 0);
+
+        // Check if moving to a board that already has this scryfall_id or same card name (when moving to commander)
+        const conflict = db.prepare(`
+          SELECT id, quantity, COALESCE(force_buy, 0) as force_buy FROM deck_cards
+          WHERE deck_id = ? AND (scryfall_id = ? OR LOWER(name) = LOWER(?)) AND board = ? AND id != ?
+        `).get(deckId, nextScryfall, row.name, nextBoard, cardRowId);
+
+        if (nextBoard === 'commander') {
+          // Ensure any duplicate copy of this card in mainboard/creatures is removed when promoted to Commander
+          db.prepare(`
+            DELETE FROM deck_cards
+            WHERE deck_id = ? AND (scryfall_id = ? OR LOWER(name) = LOWER(?)) AND id != ?
+          `).run(deckId, nextScryfall, row.name, cardRowId);
+          db.prepare(`
+            UPDATE deck_cards
+            SET scryfall_id = ?, quantity = 1, board = 'commander', finish = ?, force_buy = ?
+            WHERE id = ?
+          `).run(nextScryfall, nextFinish, nextForceBuy, cardRowId);
+        } else if (conflict) {
+          db.prepare(`UPDATE deck_cards SET quantity = ?, force_buy = ? WHERE id = ?`).run(
+            conflict.quantity + nextQty,
+            nextForceBuy || conflict.force_buy,
+            conflict.id
+          );
+          db.prepare(`DELETE FROM deck_cards WHERE id = ?`).run(cardRowId);
+        } else {
+          db.prepare(`
+            UPDATE deck_cards
+            SET scryfall_id = ?, quantity = ?, board = ?, finish = ?, force_buy = ?
+            WHERE id = ?
+          `).run(nextScryfall, nextQty, nextBoard, nextFinish, nextForceBuy, cardRowId);
+        }
+
+        if (nextBoard === 'commander') {
+          const cached = db.prepare(`SELECT image_art_crop, image_normal, color_identity, type_line FROM cards_cache WHERE scryfall_id = ?`).get(nextScryfall);
+          const cmdRows = db.prepare(`
+            SELECT c.color_identity
+            FROM deck_cards dc
+            LEFT JOIN cards_cache c ON c.scryfall_id = dc.scryfall_id
+            WHERE dc.deck_id = ? AND dc.board = 'commander'
+          `).all(deckId);
+          const combinedColors = new Set();
+          for (const r of cmdRows) {
+            for (const col of safeParse(r.color_identity, [])) {
+              combinedColors.add(col);
+            }
+          }
+          if (cached) {
+            const isBg = (cached.type_line || '').toLowerCase().includes('background');
+            const cover = cached.image_art_crop || cached.image_normal || null;
+            db.prepare(`
+              UPDATE decks
+              SET
+                commander_scryfall_id = COALESCE(CASE WHEN ? THEN commander_scryfall_id ELSE ? END, ?),
+                cover_image = COALESCE(CASE WHEN ? THEN cover_image ELSE ? END, cover_image, ?),
+                color_identity = ?,
+                updated_at = CURRENT_TIMESTAMP
+              WHERE id = ?
+            `).run(
+              isBg ? 1 : 0,
+              nextScryfall,
+              nextScryfall,
+              isBg ? 1 : 0,
+              cover,
+              cover,
+              JSON.stringify(Array.from(combinedColors)),
+              deckId
+            );
+          }
+        } else {
+          db.prepare(`UPDATE decks SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(deckId);
+        }
+
+        const updatedDeckRow = db.prepare(`SELECT * FROM decks WHERE id = ?`).get(deckId);
+        let deckDetail = null;
+        if (updatedDeckRow) {
+          const cards = getDeckCardsEnriched(deckId);
+          const invRows = db.prepare(`SELECT scryfall_id, name, quantity, finish, location, notes FROM inventory WHERE COALESCE(user_id, 1) = ?`).all(userId);
+          const allUsages = getAllActiveDeckUsages(userId);
+          const deckObj = {
+            ...updatedDeckRow,
+            color_identity: safeParse(updatedDeckRow.color_identity, []),
+            tags: safeParse(updatedDeckRow.tags, [])
+          };
+          const analysis = analyzeAndValidateDeck(deckObj, cards, invRows, allUsages);
+          deckDetail = {
+            deck: {
+              ...deckObj,
+              color_identity: analysis.stats.commanderColorIdentity.length > 0
+                ? analysis.stats.commanderColorIdentity
+                : deckObj.color_identity
+            },
+            cards,
+            analysis
+          };
+        }
+
+        return sendJson(res, 200, { ok: true, deckDetail });
+      }
+    }
+
+    // 13a. GET /api/import/progress
+    if (pathname === '/api/import/progress' && method === 'GET') {
+      return sendJson(res, 200, importProgressState);
+    }
+
+    // 13b. POST /api/import
+    if (pathname === '/api/import' && method === 'POST') {
+      const body = await readJsonBody(req);
+      const {
+        text = '',
+        target = 'inventory',
+        location = 'Main Binder',
+        deckId = null,
+        newDeckName = '',
+        newDeckFormat = 'commander',
+        newDeckFolder = 'Uncategorized',
+        commanderName = '',
+        replaceExisting = false,
+        preferInventoryPrinting = true
+      } = body;
+
+      const parsed = parseImportPayload(text, target === 'deck' ? 'decklist' : 'auto');
+      if (parsed.length === 0) {
+        return sendJson(res, 400, { error: 'No recognizable card lines found in input.' });
+      }
+
+      // If importing into a deck and a commanderName was specified, mark or insert that commander
+      if (target === 'deck' && commanderName && commanderName.trim()) {
+        const cmdClean = cleanCardNameForLookup(commanderName).toLowerCase();
+        const cmdFront = cmdClean.split('//')[0].trim();
+        let foundCmd = false;
+        for (const item of parsed) {
+          const itemClean = cleanCardNameForLookup(item.name).toLowerCase();
+          const itemFront = itemClean.split('//')[0].trim();
+          if (itemClean === cmdClean || (cmdFront && itemFront === cmdFront)) {
+            item.board = 'commander';
+            foundCmd = true;
+            break;
+          }
+        }
+        if (!foundCmd) {
+          parsed.unshift({
+            name: commanderName.trim(),
+            raw_name: commanderName.trim(),
+            quantity: 1,
+            set_code: '',
+            collector_number: '',
+            finish: 'nonfoil',
+            condition: 'NM',
+            location: 'Main Binder',
+            board: 'commander'
+          });
+        }
+      }
+
+      // When importing a decklist, automatically match against the user's Available Inventory first!
+      // This pulls owned printings directly from the user's collection and skips unnecessary Scryfall calls.
+      if (target === 'deck' && preferInventoryPrinting) {
+        const currentInv = getAllInventoryEnriched(userId);
+        // Sort so available_qty > 0 comes first, then highest available_qty
+        const sortedInv = [...currentInv].sort((a, b) => (b.available_qty || 0) - (a.available_qty || 0));
+        const invByName = new Map();
+        const invByFront = new Map();
+
+        for (const inv of sortedInv) {
+          const n = (inv.name || '').toLowerCase();
+          if (!invByName.has(n)) invByName.set(n, inv);
+          if (n.includes('//')) {
+            const front = n.split('//')[0].trim();
+            if (!invByFront.has(front)) invByFront.set(front, inv);
+          }
+        }
+
+        for (const item of parsed) {
+          const cleanLookup = cleanCardNameForLookup(item.name).toLowerCase();
+          const rawLower = (item.raw_name || item.name).toLowerCase();
+          const frontLookup = cleanLookup.split('//')[0].trim();
+          const invMatch =
+            invByName.get(cleanLookup) ||
+            invByName.get(rawLower) ||
+            invByFront.get(cleanLookup) ||
+            invByFront.get(frontLookup) ||
+            null;
+
+          if (invMatch && invMatch.scryfall_id && !String(invMatch.scryfall_id).startsWith('csv-')) {
+            item.scryfall_id = invMatch.scryfall_id;
+            item.set_code = invMatch.set_code || item.set_code;
+            item.collector_number = invMatch.collector_number || item.collector_number;
+            if (!item.finish || item.finish === 'nonfoil') {
+              item.finish = invMatch.finish || 'nonfoil';
+            }
+          }
+        }
+      }
+
+      importProgressState.active = true;
+      importProgressState.phase = 'resolving_scryfall';
+      importProgressState.totalRows = parsed.length;
+      importProgressState.resolvedCards = 0;
+      importProgressState.processedBatches = 0;
+      importProgressState.totalBatches = 0;
+      importProgressState.message = `Parsed ${parsed.length.toLocaleString()} rows. Matching inventory & resolving missing cards with Scryfall...`;
+
+      try {
+        await batchResolveScryfallCards(parsed);
+
+        importProgressState.phase = 'writing_database';
+        importProgressState.message = `Indexing and writing ${parsed.length.toLocaleString()} rows to SQLite...`;
+
+        // Pre-load cards_cache into memory maps for O(1) lookup across 9,000+ rows
+        const allCached = db.prepare(`SELECT * FROM cards_cache`).all();
+        const byId = new Map();
+        const bySetNum = new Map();
+        const byName = new Map();
+        const byFrontName = new Map();
+
+        for (const c of allCached) {
+          byId.set(c.scryfall_id.toLowerCase(), c);
+          if (c.set_code && c.collector_number) {
+            const setLower = c.set_code.toLowerCase();
+            const numLower = String(c.collector_number).toLowerCase();
+            bySetNum.set(`${setLower}:${numLower}`, c);
+            const stripped = numLower.replace(/^0+(?=\d)/, '');
+            bySetNum.set(`${setLower}:${stripped}`, c);
+          }
+          const lowerName = c.name.toLowerCase();
+          if (!byName.has(lowerName)) {
+            byName.set(lowerName, c);
+          }
+          if (lowerName.includes('//')) {
+            const front = lowerName.split('//')[0].trim();
+            if (!byFrontName.has(front)) {
+              byFrontName.set(front, c);
+            }
+          }
+        }
+
+        let resolvedCount = 0;
+        let scryfallMatchedCount = 0;
+        let fallbackCreatedCount = 0;
+        const unresolved = [];
+
+        let targetDeckId = deckId ? Number(deckId) : null;
+        if (target === 'deck' && targetDeckId) {
+          if (!getOwnedDeck(targetDeckId, userId)) {
+            return sendJson(res, 404, { error: 'Target deck not found in your vault.' });
+          }
+        }
+        if (target === 'deck' && !targetDeckId) {
+          const cleanFolder = (newDeckFolder || 'Uncategorized').trim() || 'Uncategorized';
+          if (cleanFolder !== 'Uncategorized') {
+            db.prepare(`INSERT OR IGNORE INTO deck_folders (name, user_id) VALUES (?, ?)`).run(cleanFolder, userId);
+          }
+          const resDeck = db.prepare(`
+            INSERT INTO decks (user_id, name, format, folder, description)
+            VALUES (?, ?, ?, ?, 'Pasted decklist — auto-matched against collection & Buy List')
+          `).run(userId, newDeckName || 'Pasted Deck', newDeckFormat || 'commander', cleanFolder);
+          targetDeckId = Number(resDeck.lastInsertRowid);
+        }
+
+        const selectInvExisting = db.prepare(`
+          SELECT id, quantity FROM inventory
+          WHERE COALESCE(user_id, 1) = ? AND scryfall_id = ? AND finish = ? AND condition = ? AND location = ?
+        `);
+        const updateInvQty = db.prepare(`
+          UPDATE inventory SET quantity = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
+        `);
+        const insertInvRow = db.prepare(`
+          INSERT INTO inventory (user_id, scryfall_id, name, set_code, collector_number, quantity, finish, condition, language, location, purchase_price)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+
+        const selectDeckExisting = db.prepare(`
+          SELECT id, quantity FROM deck_cards
+          WHERE deck_id = ? AND scryfall_id = ? AND board = ?
+        `);
+        const updateDeckQty = db.prepare(`
+          UPDATE deck_cards SET quantity = ? WHERE id = ?
+        `);
+        const insertDeckRow = db.prepare(`
+          INSERT INTO deck_cards (deck_id, scryfall_id, name, quantity, board, finish)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `);
+
+        let firstArtCrop = null;
+
+        db.exec('BEGIN TRANSACTION');
+        try {
+          if (replaceExisting) {
+            if (target === 'inventory') {
+              db.prepare(`DELETE FROM inventory WHERE COALESCE(user_id, 1) = ?`).run(userId);
+            } else if (target === 'deck' && targetDeckId) {
+              db.prepare(`DELETE FROM deck_cards WHERE deck_id = ?`).run(targetDeckId);
+            }
+          }
+
+          for (const item of parsed) {
+            let cardRow = null;
+            if (item.scryfall_id) {
+              cardRow = byId.get(item.scryfall_id.toLowerCase()) || null;
+            }
+            if (!cardRow && item.set_code && item.collector_number) {
+              const cleanSet = item.set_code.toLowerCase().replace(/[^a-z0-9]/g, '');
+              const numLower = String(item.collector_number).toLowerCase();
+              const stripped = numLower.replace(/^0+(?=\d)/, '');
+              cardRow = bySetNum.get(`${cleanSet}:${numLower}`) || bySetNum.get(`${cleanSet}:${stripped}`) || null;
+            }
+            if (!cardRow) {
+              const cleanLookup = cleanCardNameForLookup(item.name).toLowerCase();
+              const rawLower = (item.raw_name || item.name).toLowerCase();
+              cardRow =
+                byName.get(cleanLookup) ||
+                byName.get(rawLower) ||
+                byFrontName.get(cleanLookup) ||
+                byFrontName.get(rawLower.split('//')[0].trim()) ||
+                null;
+            }
+
+            if (cardRow) {
+              scryfallMatchedCount += item.quantity;
+            } else {
+              // Never drop any card from the user's CSV/decklist! Create a fallback card entry in cards_cache
+              const safeSlug = `${item.set_code || 'csv'}-${item.collector_number || '0'}-${item.name}`
+                .toLowerCase()
+                .replace(/[^a-z0-9]+/g, '-')
+                .slice(0, 64);
+              const fallbackId = item.scryfall_id || `csv-${safeSlug}`;
+              const fallbackPrice = item.purchase_price ?? null;
+              const fallbackCard = {
+                scryfall_id: fallbackId,
+                oracle_id: null,
+                name: item.raw_name || item.name,
+                set_code: item.set_code || 'unk',
+                set_name: item.set_name || 'Imported Set',
+                collector_number: item.collector_number || '',
+                mana_cost: '',
+                cmc: 0,
+                type_line: 'Card',
+                oracle_text: '',
+                colors: '[]',
+                color_identity: '[]',
+                rarity: 'common',
+                image_normal: null,
+                image_small: null,
+                image_art_crop: null,
+                tcg_usd: fallbackPrice,
+                tcg_usd_foil: item.finish !== 'nonfoil' ? fallbackPrice : null,
+                tcg_usd_etched: null,
+                tcgplayer_id: null,
+                tcgplayer_url: `https://www.tcgplayer.com/search/magic/product?q=${encodeURIComponent(item.name)}`,
+                cardkingdom_url: `https://www.cardkingdom.com/catalog/search?search=header&filter%5Bname%5D=${encodeURIComponent(item.name)}`,
+                ck_retail_nonfoil: fallbackPrice,
+                ck_retail_foil: item.finish !== 'nonfoil' ? fallbackPrice : null,
+                ck_buylist_nonfoil: null,
+                ck_buylist_foil: null,
+                ck_qty_nonfoil: null,
+                ck_qty_foil: null,
+                legalities: '{}',
+                produced_mana: '[]',
+                power: null,
+                toughness: null,
+                keywords: '[]'
+              };
+              upsertCardCache(fallbackCard);
+              cardRow = fallbackCard;
+              byId.set(fallbackId.toLowerCase(), fallbackCard);
+              byName.set(item.name.toLowerCase(), fallbackCard);
+              fallbackCreatedCount += item.quantity;
+            }
+
+            resolvedCount += item.quantity;
+
+            if (!firstArtCrop && (cardRow.image_art_crop || cardRow.image_normal)) {
+              firstArtCrop = cardRow.image_art_crop || cardRow.image_normal;
+            }
+
+            if (target === 'inventory') {
+              const targetLoc = item.location || location || 'Main Binder';
+              const finish = item.finish || 'nonfoil';
+              const cond = item.condition || 'NM';
+              const lang = item.language || 'EN';
+
+              const existing = selectInvExisting.get(userId, cardRow.scryfall_id, finish, cond, targetLoc);
+              if (existing) {
+                updateInvQty.run(existing.quantity + item.quantity, existing.id);
+              } else {
+                insertInvRow.run(
+                  userId,
+                  cardRow.scryfall_id,
+                  cardRow.name,
+                  cardRow.set_code || item.set_code || '',
+                  cardRow.collector_number || item.collector_number || '',
+                  item.quantity,
+                  finish,
+                  cond,
+                  lang,
+                  targetLoc,
+                  item.purchase_price ?? null
+                );
+              }
+            } else if (target === 'deck' && targetDeckId) {
+              const board = item.board || 'mainboard';
+              const existing = selectDeckExisting.get(targetDeckId, cardRow.scryfall_id, board);
+              if (existing) {
+                updateDeckQty.run(existing.quantity + item.quantity, existing.id);
+              } else {
+                insertDeckRow.run(
+                  targetDeckId,
+                  cardRow.scryfall_id,
+                  cardRow.name,
+                  item.quantity,
+                  board,
+                  item.finish || 'nonfoil'
+                );
+              }
+
+              if (board === 'commander') {
+                db.prepare(`
+                  UPDATE decks
+                  SET commander_scryfall_id = ?, cover_image = COALESCE(?, cover_image), color_identity = ?, updated_at = CURRENT_TIMESTAMP
+                  WHERE id = ?
+                `).run(cardRow.scryfall_id, cardRow.image_art_crop || cardRow.image_normal, cardRow.color_identity, targetDeckId);
+              }
+            }
+          }
+
+          if (target === 'deck' && targetDeckId && firstArtCrop) {
+            db.prepare(`
+              UPDATE decks
+              SET cover_image = COALESCE(cover_image, ?), updated_at = CURRENT_TIMESTAMP
+              WHERE id = ?
+            `).run(firstArtCrop, targetDeckId);
+          }
+
+          db.exec('COMMIT');
+        } catch (txErr) {
+          db.exec('ROLLBACK');
+          throw txErr;
+        }
+
+        let deckBreakdown = null;
+        if (target === 'deck' && targetDeckId) {
+          const deckRow = db.prepare(`SELECT * FROM decks WHERE id = ?`).get(targetDeckId);
+          const cards = getDeckCardsEnriched(targetDeckId);
+          const invRows = getAllInventoryEnriched(userId);
+          const allUsages = getAllActiveDeckUsages(userId);
+          const deckObj = {
+            ...deckRow,
+            color_identity: safeParse(deckRow.color_identity, []),
+            tags: safeParse(deckRow.tags, [])
+          };
+          const analysis = analyzeAndValidateDeck(deckObj, cards, invRows, allUsages);
+          deckBreakdown = {
+            deckId: targetDeckId,
+            deckName: deckRow.name,
+            totalRequired: analysis.ownership.totalRequired,
+            pulledFromInventoryCount: analysis.ownership.totalOwned,
+            addedToBuyListCount: analysis.ownership.totalMissing,
+            completionPct: analysis.ownership.completionPct,
+            missingCostTcg: analysis.ownership.missingCostTcg,
+            missingCostCkRetail: analysis.ownership.missingCostCkRetail,
+            missingCards: analysis.ownership.missingCards
+          };
+        }
+
+        importProgressState.active = false;
+        importProgressState.phase = 'done';
+        importProgressState.message = `Imported ${resolvedCount.toLocaleString()} cards (${parsed.length.toLocaleString()} rows)!`;
+
+        return sendJson(res, 200, {
+          ok: true,
+          resolvedCount,
+          parsedRowCount: parsed.length,
+          scryfallMatchedCount,
+          fallbackCreatedCount,
+          unresolved,
+          deckId: targetDeckId,
+          deckBreakdown
+        });
+      } finally {
+        importProgressState.active = false;
+      }
+    }
+
+    return sendJson(res, 404, { error: `Unknown API route: ${method} ${pathname}` });
+  } catch (err) {
+    console.error('API Error:', err);
+    return sendJson(res, 500, { error: err.message || 'Internal server error' });
+  }
+}
+
+function safeParse(str, fallback) {
+  if (typeof str !== 'string') return str ?? fallback;
+  try {
+    return JSON.parse(str);
+  } catch {
+    return fallback;
+  }
+}
+
+async function startServer() {
+  const server = http.createServer();
+
+  if (!isProd) {
+    const { createServer: createViteServer } = await import('vite');
+    const vite = await createViteServer({
+      server: {
+        middlewareMode: true,
+        watch: {
+          ignored: ['**/data/**', '**/*.sqlite', '**/*.sqlite-*']
+        }
+      },
+      appType: 'spa'
+    });
+
+    server.on('request', async (req, res) => {
+      const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+      if (url.pathname.startsWith('/api/')) {
+        return handleApi(req, res, url);
+      }
+      vite.middlewares(req, res, () => {
+        res.statusCode = 404;
+        res.end('Not found');
+      });
+    });
+  } else {
+    const distDir = path.resolve(__dirname, '..', 'dist');
+    server.on('request', async (req, res) => {
+      const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+      if (url.pathname.startsWith('/api/')) {
+        return handleApi(req, res, url);
+      }
+      const safeRelative = path
+        .normalize(decodeURIComponent(url.pathname === '/' ? 'index.html' : url.pathname))
+        .replace(/^(\.\.(\/|\\|$))+/, '')
+        .replace(/^[/\\]+/, '');
+      let filePath = path.resolve(distDir, safeRelative);
+      if (!filePath.startsWith(distDir) || !fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
+        filePath = path.join(distDir, 'index.html');
+      }
+      const ext = path.extname(filePath).toLowerCase();
+      const mimeTypes = {
+        '.html': 'text/html; charset=utf-8',
+        '.js': 'application/javascript; charset=utf-8',
+        '.css': 'text/css; charset=utf-8',
+        '.json': 'application/json',
+        '.svg': 'image/svg+xml',
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.ico': 'image/x-icon',
+        '.woff2': 'font/woff2'
+      };
+      const isHashedAsset = url.pathname.startsWith('/assets/');
+      res.writeHead(200, {
+        'Content-Type': mimeTypes[ext] || 'application/octet-stream',
+        'Cache-Control': isHashedAsset ? 'public, max-age=31536000, immutable' : 'no-cache',
+        'X-Content-Type-Options': 'nosniff',
+        'X-Frame-Options': 'SAMEORIGIN',
+        'Referrer-Policy': 'strict-origin-when-cross-origin'
+      });
+      fs.createReadStream(filePath).pipe(res);
+    });
+  }
+
+  const shouldOpenBrowser =
+    process.argv.includes('--open') ||
+    process.env.AUTO_OPEN_BROWSER === '1' ||
+    process.env.AUTO_OPEN_BROWSER === 'true';
+
+  async function openBrowserUrl(targetUrl) {
+    try {
+      const { exec } = await import('node:child_process');
+      if (process.platform === 'win32') {
+        exec(`start "" "${targetUrl}"`);
+      } else if (process.platform === 'darwin') {
+        exec(`open "${targetUrl}"`);
+      } else {
+        exec(`xdg-open "${targetUrl}"`);
+      }
+    } catch {
+      // Ignore browser launch errors
+    }
+  }
+
+  server.on('error', async err => {
+    if (err && err.code === 'EADDRINUSE') {
+      console.log(`\n✨ AetherVault is already running at http://localhost:${PORT}\n`);
+      if (shouldOpenBrowser) {
+        await openBrowserUrl(`http://localhost:${PORT}`);
+      }
+      process.exit(0);
+    } else {
+      console.error('Server error:', err);
+    }
+  });
+
+  server.listen(PORT, '0.0.0.0', () => {
+    const netInfo = getLanNetworkInfo();
+    console.log(`\n✨ AetherVault MTG Inventory & Deck Builder running at:`);
+    console.log(`   • Local PC:       http://localhost:${PORT}`);
+    if (netInfo.lanUrls.length > 0) {
+      for (const u of netInfo.lanUrls) {
+        console.log(`   • Wi-Fi / Mobile: ${u}`);
+      }
+    }
+    console.log('');
+    if (shouldOpenBrowser) {
+      openBrowserUrl(`http://localhost:${PORT}`);
+    }
+  });
+}
+
+startServer();

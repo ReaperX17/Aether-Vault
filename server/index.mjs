@@ -72,11 +72,94 @@ function verifyPassword(password, storedHash, storedSalt, legacyPin = '') {
   return false;
 }
 
+function hashSessionToken(rawToken) {
+  return crypto.createHash('sha256').update(String(rawToken)).digest('hex');
+}
+
 function createSession(userId) {
-  const token = crypto.randomBytes(32).toString('hex');
+  const rawToken = crypto.randomBytes(32).toString('hex');
+  const tokenHash = hashSessionToken(rawToken);
   const expiresAt = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString();
-  db.prepare(`INSERT INTO user_sessions (token, user_id, expires_at) VALUES (?, ?, ?)`).run(token, userId, expiresAt);
-  return token;
+  db.prepare(`INSERT INTO user_sessions (token, user_id, expires_at) VALUES (?, ?, ?)`).run(tokenHash, userId, expiresAt);
+  return rawToken;
+}
+
+// Smart, non-intrusive Brute-Force Login & Registration Rate Limiting
+const loginAttemptsMap = new Map();
+const registerAttemptsMap = new Map();
+
+function getClientIp(req) {
+  const fwd = req.headers['x-forwarded-for'];
+  if (typeof fwd === 'string' && fwd.trim()) {
+    return fwd.split(',')[0].trim();
+  }
+  return req.socket?.remoteAddress || 'unknown';
+}
+
+function checkLoginRateLimit(ip, username) {
+  const key = `${ip}:${String(username || '').toLowerCase()}`;
+  const entry = loginAttemptsMap.get(key);
+  if (!entry) return { allowed: true };
+  const now = Date.now();
+  if (entry.lockedUntil && now < entry.lockedUntil) {
+    const secsLeft = Math.ceil((entry.lockedUntil - now) / 1000);
+    return {
+      allowed: false,
+      message: `Too many failed sign-in attempts. Please wait ${secsLeft} seconds before trying again.`
+    };
+  }
+  if (now - entry.firstAttemptAt > 10 * 60 * 1000) {
+    loginAttemptsMap.delete(key);
+    return { allowed: true };
+  }
+  return { allowed: true };
+}
+
+function recordFailedLogin(ip, username) {
+  const key = `${ip}:${String(username || '').toLowerCase()}`;
+  const now = Date.now();
+  const entry = loginAttemptsMap.get(key) || { count: 0, firstAttemptAt: now, lockedUntil: 0 };
+  if (now - entry.firstAttemptAt > 10 * 60 * 1000) {
+    entry.count = 0;
+    entry.firstAttemptAt = now;
+  }
+  entry.count += 1;
+  // Lock for 5 minutes after 8 failed password guesses (generous for real typos, stops automated dictionary attacks)
+  if (entry.count >= 8) {
+    entry.lockedUntil = now + 5 * 60 * 1000;
+  }
+  loginAttemptsMap.set(key, entry);
+}
+
+function clearLoginAttempts(ip, username) {
+  const key = `${ip}:${String(username || '').toLowerCase()}`;
+  loginAttemptsMap.delete(key);
+}
+
+function checkRegisterRateLimit(ip) {
+  const now = Date.now();
+  const list = (registerAttemptsMap.get(ip) || []).filter(ts => now - ts < 60 * 60 * 1000);
+  if (list.length >= 10) {
+    return false;
+  }
+  list.push(now);
+  registerAttemptsMap.set(ip, list);
+  return true;
+}
+
+function verifySameOrigin(req) {
+  const method = (req.method || 'GET').toUpperCase();
+  if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return true;
+  const origin = req.headers['origin'];
+  if (!origin) return true;
+  try {
+    const originHost = new URL(origin).host.toLowerCase();
+    const targetHost = String(req.headers['x-forwarded-host'] || req.headers['host'] || '').toLowerCase();
+    if (!targetHost) return true;
+    return originHost === targetHost;
+  } catch {
+    return false;
+  }
 }
 
 function parseCookies(cookieHeader = '') {
@@ -132,19 +215,29 @@ function resolveRequestAuth(req, url) {
   const token = extractSessionToken(req);
 
   if (token) {
+    const tokenHash = hashSessionToken(token);
     const sess = db
       .prepare(
         `SELECT s.token, s.user_id, u.id, u.name, u.avatar_color, u.password_hash, u.pin_code
          FROM user_sessions s
          JOIN users u ON u.id = s.user_id
-         WHERE s.token = ? AND s.expires_at > datetime('now')`
+         WHERE (s.token = ? OR s.token = ?) AND s.expires_at > datetime('now')`
       )
-      .get(token);
+      .get(tokenHash, token);
     if (sess) {
+      // Automatically upgrade any legacy unhashed session row in-place to SHA-256 hash at rest
+      if (sess.token === token && sess.token !== tokenHash) {
+        try {
+          db.prepare(`UPDATE user_sessions SET token = ? WHERE token = ?`).run(tokenHash, token);
+        } catch {
+          // ignore
+        }
+      }
       return {
         authenticated: true,
         userId: Number(sess.user_id),
-        token: sess.token,
+        token,
+        tokenHash,
         isPublic
       };
     }
@@ -254,8 +347,8 @@ function readJsonBody(req) {
     let data = '';
     req.on('data', chunk => {
       data += chunk;
-      if (data.length > 100 * 1024 * 1024) {
-        reject(new Error('Payload too large'));
+      if (data.length > 15 * 1024 * 1024) {
+        reject(new Error('Payload too large (max 15 MB)'));
       }
     });
     req.on('end', () => {
@@ -270,13 +363,26 @@ function readJsonBody(req) {
   });
 }
 
+function getSecurityHeaders(isPublic = false) {
+  const headers = {
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'SAMEORIGIN',
+    'Referrer-Policy': 'strict-origin-when-cross-origin',
+    'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=()',
+    'Content-Security-Policy':
+      "default-src 'self'; img-src 'self' data: https://*.scryfall.io https://*.scryfall.com https://api.qrserver.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self' 'unsafe-inline'; connect-src 'self' https://api.scryfall.com; frame-ancestors 'self';"
+  };
+  if (isPublic) {
+    headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains';
+  }
+  return headers;
+}
+
 function sendJson(res, status, payload, extraHeaders = {}) {
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
-    'X-Content-Type-Options': 'nosniff',
-    'X-Frame-Options': 'SAMEORIGIN',
-    'Referrer-Policy': 'strict-origin-when-cross-origin',
+    ...getSecurityHeaders(isProd),
     ...extraHeaders
   });
   res.end(JSON.stringify(payload));
@@ -406,7 +512,13 @@ async function handleApi(req, res, url) {
       });
     }
 
+    // CSRF Same-Origin Protection for mutating requests
+    if (!verifySameOrigin(req)) {
+      return sendJson(res, 403, { error: 'Cross-origin request blocked for your security.' });
+    }
+
     const auth = resolveRequestAuth(req, url);
+    const clientIp = getClientIp(req);
 
     // 0. Authentication & Personal Account Isolation Endpoints (/api/auth/*)
     if (pathname === '/api/auth/me' && method === 'GET') {
@@ -419,6 +531,10 @@ async function handleApi(req, res, url) {
       }
       const activeToken = auth.token || createSession(auth.userId);
       const userObj = getSingleUserWithStats(auth.userId);
+      const sessionCount =
+        db
+          .prepare(`SELECT COUNT(*) as cnt FROM user_sessions WHERE user_id = ? AND expires_at > datetime('now')`)
+          .get(auth.userId)?.cnt || 1;
       const cookieHeader = `aethervault_session=${encodeURIComponent(activeToken)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=7776000${auth.isPublic ? '; Secure' : ''}`;
       return sendJson(
         res,
@@ -427,6 +543,7 @@ async function handleApi(req, res, url) {
           authenticated: true,
           token: activeToken,
           user: userObj,
+          activeSessions: Number(sessionCount),
           isPublic: auth.isPublic
         },
         { 'Set-Cookie': cookieHeader }
@@ -434,11 +551,14 @@ async function handleApi(req, res, url) {
     }
 
     if (pathname === '/api/auth/register' && method === 'POST') {
+      if (!checkRegisterRateLimit(clientIp)) {
+        return sendJson(res, 429, { error: 'Too many new accounts created from this IP recently. Please try again later.' });
+      }
       const body = await readJsonBody(req);
       const cleanName = String(body.username || body.name || '').trim();
       const rawPassword = String(body.password || body.pin_code || '');
       const avatarColor = String(body.avatar_color || 'amber').trim() || 'amber';
-      const email = String(body.email || '').trim();
+      const email = String(body.email || '').trim().slice(0, 120);
 
       if (cleanName.length < 2 || cleanName.length > 40) {
         return sendJson(res, 400, { error: 'Username must be between 2 and 40 characters.' });
@@ -483,8 +603,14 @@ async function handleApi(req, res, url) {
         return sendJson(res, 400, { error: 'Please enter your username.' });
       }
 
+      const rateStatus = checkLoginRateLimit(clientIp, cleanName);
+      if (!rateStatus.allowed) {
+        return sendJson(res, 429, { error: rateStatus.message });
+      }
+
       const userRow = db.prepare(`SELECT * FROM users WHERE LOWER(name) = LOWER(?)`).get(cleanName);
       if (!userRow) {
+        recordFailedLogin(clientIp, cleanName);
         return sendJson(res, 401, { error: 'Invalid username or password.' });
       }
 
@@ -496,6 +622,7 @@ async function handleApi(req, res, url) {
       if (hasPassword) {
         const valid = verifyPassword(rawPassword, userRow.password_hash, userRow.password_salt, userRow.pin_code);
         if (!valid) {
+          recordFailedLogin(clientIp, cleanName);
           return sendJson(res, 401, { error: 'Invalid username or password.' });
         }
         // Automatically upgrade legacy pin_code to salted scrypt password_hash
@@ -522,6 +649,7 @@ async function handleApi(req, res, url) {
         }
       }
 
+      clearLoginAttempts(clientIp, cleanName);
       const token = createSession(Number(userRow.id));
       const userObj = getSingleUserWithStats(Number(userRow.id));
       const cookieHeader = `aethervault_session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=7776000${auth.isPublic ? '; Secure' : ''}`;
@@ -542,10 +670,26 @@ async function handleApi(req, res, url) {
     if (pathname === '/api/auth/logout' && method === 'POST') {
       const token = extractSessionToken(req);
       if (token) {
-        db.prepare(`DELETE FROM user_sessions WHERE token = ?`).run(token);
+        const tokenHash = hashSessionToken(token);
+        db.prepare(`DELETE FROM user_sessions WHERE token = ? OR token = ?`).run(tokenHash, token);
       }
       const clearCookie = `aethervault_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
       return sendJson(res, 200, { ok: true }, { 'Set-Cookie': clearCookie });
+    }
+
+    if (pathname === '/api/auth/revoke-other-sessions' && method === 'POST') {
+      if (!auth.authenticated || !auth.userId) {
+        return sendJson(res, 401, { error: 'Please sign in first.', requireAuth: true });
+      }
+      const currentHash = auth.tokenHash || (auth.token ? hashSessionToken(auth.token) : '');
+      const resDel = db
+        .prepare(`DELETE FROM user_sessions WHERE user_id = ? AND token != ? AND token != ?`)
+        .run(auth.userId, currentHash, auth.token || '');
+      return sendJson(res, 200, {
+        ok: true,
+        revokedCount: Number(resDel.changes || 0),
+        message: 'Signed out of all other devices.'
+      });
     }
 
     if (pathname === '/api/auth/password' && method === 'POST') {
@@ -584,7 +728,12 @@ async function handleApi(req, res, url) {
 
       // Revoke all other session tokens for this user
       if (auth.token) {
-        db.prepare(`DELETE FROM user_sessions WHERE user_id = ? AND token != ?`).run(auth.userId, auth.token);
+        const currentHash = auth.tokenHash || hashSessionToken(auth.token);
+        db.prepare(`DELETE FROM user_sessions WHERE user_id = ? AND token != ? AND token != ?`).run(
+          auth.userId,
+          currentHash,
+          auth.token
+        );
       }
       return sendJson(res, 200, {
         ok: true,
@@ -671,6 +820,173 @@ async function handleApi(req, res, url) {
     }
 
     const userId = auth.userId;
+
+    // 0b-0. Personal Vault Full JSON Backup & Restore (GET /api/vault/backup & POST /api/vault/restore)
+    if (pathname === '/api/vault/backup' && method === 'GET') {
+      const userObj = getSingleUserWithStats(userId);
+      const inventoryRows = db
+        .prepare(
+          `SELECT scryfall_id, name, set_code, collector_number, quantity, finish, condition, language, location, purchase_price, notes, created_at
+           FROM inventory WHERE COALESCE(user_id, 1) = ? ORDER BY id ASC`
+        )
+        .all(userId);
+      const folderRows = db
+        .prepare(`SELECT name FROM deck_folders WHERE COALESCE(user_id, 1) = ? ORDER BY name ASC`)
+        .all(userId);
+      const deckRows = db
+        .prepare(`SELECT * FROM decks WHERE COALESCE(user_id, 1) = ? ORDER BY id ASC`)
+        .all(userId);
+      const decksWithCards = deckRows.map(d => {
+        const cards = db
+          .prepare(
+            `SELECT scryfall_id, name, quantity, board, finish, custom_category, COALESCE(force_buy, 0) as force_buy
+             FROM deck_cards WHERE deck_id = ? ORDER BY id ASC`
+          )
+          .all(d.id);
+        return {
+          name: d.name,
+          format: d.format,
+          folder: d.folder || 'Uncategorized',
+          description: d.description || '',
+          commander_scryfall_id: d.commander_scryfall_id || null,
+          partner_scryfall_id: d.partner_scryfall_id || null,
+          cover_image: d.cover_image || null,
+          color_identity: safeParse(d.color_identity, []),
+          tags: safeParse(d.tags, []),
+          cards
+        };
+      });
+
+      return sendJson(res, 200, {
+        version: 'aethervault-backup-v1',
+        exportedAt: new Date().toISOString(),
+        accountName: userObj?.name || 'Vault',
+        inventory: inventoryRows,
+        folders: folderRows.map(r => r.name),
+        decks: decksWithCards
+      });
+    }
+
+    if (pathname === '/api/vault/restore' && method === 'POST') {
+      const body = await readJsonBody(req);
+      const backup = body.backup || body;
+      const replaceExisting = Boolean(body.replaceExisting);
+
+      if (!backup || (!Array.isArray(backup.inventory) && !Array.isArray(backup.decks))) {
+        return sendJson(res, 400, { error: 'Invalid AetherVault backup file format.' });
+      }
+
+      let restoredCards = 0;
+      let restoredDecks = 0;
+
+      db.exec('BEGIN TRANSACTION');
+      try {
+        if (replaceExisting) {
+          const userDecks = db.prepare(`SELECT id FROM decks WHERE COALESCE(user_id, 1) = ?`).all(userId);
+          for (const d of userDecks) {
+            db.prepare(`DELETE FROM deck_cards WHERE deck_id = ?`).run(d.id);
+          }
+          db.prepare(`DELETE FROM decks WHERE COALESCE(user_id, 1) = ?`).run(userId);
+          db.prepare(`DELETE FROM deck_folders WHERE COALESCE(user_id, 1) = ?`).run(userId);
+          db.prepare(`DELETE FROM inventory WHERE COALESCE(user_id, 1) = ?`).run(userId);
+        }
+
+        if (Array.isArray(backup.folders)) {
+          const insFolder = db.prepare(`INSERT OR IGNORE INTO deck_folders (user_id, name) VALUES (?, ?)`);
+          for (const f of backup.folders) {
+            const cleanF = String(f || '').trim();
+            if (cleanF && cleanF !== 'Uncategorized') {
+              insFolder.run(userId, cleanF);
+            }
+          }
+        }
+
+        if (Array.isArray(backup.inventory)) {
+          const insInv = db.prepare(`
+            INSERT INTO inventory (user_id, scryfall_id, name, set_code, collector_number, quantity, finish, condition, language, location, purchase_price, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `);
+          for (const item of backup.inventory) {
+            if (!item || !item.scryfall_id || !item.name) continue;
+            const qty = Math.max(1, Number(item.quantity || 1));
+            insInv.run(
+              userId,
+              String(item.scryfall_id),
+              String(item.name),
+              String(item.set_code || ''),
+              String(item.collector_number || ''),
+              qty,
+              String(item.finish || 'nonfoil'),
+              String(item.condition || 'NM'),
+              String(item.language || 'EN'),
+              String(item.location || 'Main Binder'),
+              item.purchase_price !== null && item.purchase_price !== undefined ? Number(item.purchase_price) : null,
+              String(item.notes || '')
+            );
+            restoredCards += qty;
+          }
+        }
+
+        if (Array.isArray(backup.decks)) {
+          const insDeck = db.prepare(`
+            INSERT INTO decks (user_id, name, format, folder, description, commander_scryfall_id, partner_scryfall_id, cover_image, color_identity, tags)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `);
+          const insDeckCard = db.prepare(`
+            INSERT OR REPLACE INTO deck_cards (deck_id, scryfall_id, name, quantity, board, finish, custom_category, force_buy)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `);
+          for (const d of backup.decks) {
+            if (!d || !d.name) continue;
+            const folderName = String(d.folder || 'Uncategorized').trim() || 'Uncategorized';
+            if (folderName !== 'Uncategorized') {
+              db.prepare(`INSERT OR IGNORE INTO deck_folders (user_id, name) VALUES (?, ?)`).run(userId, folderName);
+            }
+            const resD = insDeck.run(
+              userId,
+              String(d.name),
+              String(d.format || 'commander'),
+              folderName,
+              String(d.description || ''),
+              d.commander_scryfall_id || null,
+              d.partner_scryfall_id || null,
+              d.cover_image || null,
+              JSON.stringify(Array.isArray(d.color_identity) ? d.color_identity : []),
+              JSON.stringify(Array.isArray(d.tags) ? d.tags : [])
+            );
+            const newDeckId = Number(resD.lastInsertRowid);
+            restoredDecks++;
+            if (Array.isArray(d.cards)) {
+              for (const c of d.cards) {
+                if (!c || !c.scryfall_id || !c.name) continue;
+                insDeckCard.run(
+                  newDeckId,
+                  String(c.scryfall_id),
+                  String(c.name),
+                  Math.max(1, Number(c.quantity || 1)),
+                  String(c.board || 'mainboard'),
+                  String(c.finish || 'nonfoil'),
+                  String(c.custom_category || ''),
+                  c.force_buy ? 1 : 0
+                );
+              }
+            }
+          }
+        }
+
+        db.exec('COMMIT');
+      } catch (err) {
+        db.exec('ROLLBACK');
+        throw err;
+      }
+
+      return sendJson(res, 200, {
+        ok: true,
+        restoredCards,
+        restoredDecks,
+        message: `Restored ${restoredCards.toLocaleString()} cards and ${restoredDecks} decks to your vault!`
+      });
+    }
 
     // 0b. Multi-User Profile Endpoints: GET & POST /api/users, PATCH & DELETE /api/users/:id
     if (pathname === '/api/users' && method === 'GET') {

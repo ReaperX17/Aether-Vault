@@ -22,7 +22,8 @@ import {
   Lock,
   LogOut,
   KeyRound,
-  UserPlus
+  UserPlus,
+  Download
 } from 'lucide-react';
 import { BoardType, DashboardData, DeckSummary, InventoryItem, NetworkInfo, UserProfile } from './types';
 import { DashboardView } from './components/DashboardView';
@@ -1325,7 +1326,25 @@ export const App: React.FC = () => {
                   />
                 </div>
               </div>
-              <div className="flex justify-end">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    setProfileErrorMsg(null);
+                    setProfileSuccessMsg(null);
+                    const res = await fetch('/api/auth/revoke-other-sessions', { method: 'POST' });
+                    const json = await res.json();
+                    if (res.ok) {
+                      setProfileSuccessMsg(json.message || 'Signed out of all other devices.');
+                    } else {
+                      setProfileErrorMsg(json.error || 'Could not revoke sessions.');
+                    }
+                  }}
+                  className="px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 font-semibold text-xs flex items-center gap-1.5 cursor-pointer"
+                >
+                  <ShieldCheck className="w-3.5 h-3.5 text-sky-400" />
+                  Sign Out Other Devices
+                </button>
                 <button
                   type="submit"
                   className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 cursor-pointer"
@@ -1335,6 +1354,90 @@ export const App: React.FC = () => {
                 </button>
               </div>
             </form>
+
+            {/* Personal Vault Backup & Restore (.json) */}
+            <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-2.5">
+              <div className="text-xs font-bold text-sky-300 flex items-center gap-1.5">
+                <Download className="w-4 h-4 text-sky-400" />
+                Personal Vault Backup &amp; Restore
+              </div>
+              <p className="text-[11px] text-slate-400">
+                Download a complete offline backup of your collection, binders, and decks as a JSON file, or restore a saved backup anytime.
+              </p>
+              <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    setProfileErrorMsg(null);
+                    setProfileSuccessMsg(null);
+                    try {
+                      const res = await fetch('/api/vault/backup');
+                      if (!res.ok) {
+                        setProfileErrorMsg('Could not generate backup.');
+                        return;
+                      }
+                      const data = await res.json();
+                      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement('a');
+                      const safeName = (activeUserProfile.name || 'vault').toLowerCase().replace(/[^a-z0-9]+/g, '-');
+                      const dateStr = new Date().toISOString().slice(0, 10);
+                      a.href = url;
+                      a.download = `aethervault-backup-${safeName}-${dateStr}.json`;
+                      document.body.appendChild(a);
+                      a.click();
+                      document.body.removeChild(a);
+                      URL.revokeObjectURL(url);
+                      setProfileSuccessMsg('Downloaded your personal vault backup file!');
+                    } catch {
+                      setProfileErrorMsg('Failed to download backup.');
+                    }
+                  }}
+                  className="px-3.5 py-2 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  Download My Vault Backup (.json)
+                </button>
+
+                <label className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 font-semibold text-xs flex items-center gap-1.5 cursor-pointer">
+                  <Upload className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Restore From Backup File</span>
+                  <input
+                    type="file"
+                    accept=".json,application/json"
+                    className="hidden"
+                    onChange={async e => {
+                      const file = e.target.files?.[0];
+                      e.target.value = '';
+                      if (!file) return;
+                      setProfileErrorMsg(null);
+                      setProfileSuccessMsg(null);
+                      try {
+                        const text = await file.text();
+                        const parsed = JSON.parse(text);
+                        const replaceExisting = window.confirm(
+                          'Replace your current vault contents with this backup? (Click OK to replace, or Cancel to merge/add onto your current vault)'
+                        );
+                        const res = await fetch('/api/vault/restore', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ backup: parsed, replaceExisting })
+                        });
+                        const json = await res.json();
+                        if (!res.ok) {
+                          setProfileErrorMsg(json.error || 'Could not restore backup file.');
+                          return;
+                        }
+                        setProfileSuccessMsg(json.message || 'Vault backup restored!');
+                        await fetchAllData();
+                      } catch {
+                        setProfileErrorMsg('Invalid backup JSON file.');
+                      }
+                    }}
+                  />
+                </label>
+              </div>
+            </div>
 
             {/* Create New Profile Form */}
             <form

@@ -9,6 +9,7 @@ data/*.sqlite
 data/*.sqlite-wal
 data/*.sqlite-shm
 data/*.db
+data/backups/
 
 # Environment & Logs
 .env

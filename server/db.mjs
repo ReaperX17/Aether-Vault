@@ -401,3 +401,41 @@ if (!initRow) {
 
   db.prepare(`INSERT INTO sync_meta (key, value) VALUES ('seeded_v1', 'true')`).run();
 }
+
+export function runDailyDatabaseBackup() {
+  try {
+    // Purge expired session tokens automatically
+    db.prepare(`DELETE FROM user_sessions WHERE expires_at <= datetime('now')`).run();
+
+    const backupDir = path.join(dataDir, 'backups');
+    if (!fs.existsSync(backupDir)) {
+      fs.mkdirSync(backupDir, { recursive: true });
+    }
+
+    const today = new Date().toISOString().slice(0, 10);
+    const targetFile = path.join(backupDir, `mtg_vault_${today}.sqlite`);
+    if (!fs.existsSync(targetFile)) {
+      const escapedTarget = targetFile.replace(/'/g, "''");
+      db.exec(`VACUUM INTO '${escapedTarget}';`);
+    }
+
+    // Keep the 7 most recent daily backup files
+    const files = fs
+      .readdirSync(backupDir)
+      .filter(f => f.startsWith('mtg_vault_') && f.endsWith('.sqlite'))
+      .sort()
+      .reverse();
+    for (const oldFile of files.slice(7)) {
+      try {
+        fs.unlinkSync(path.join(backupDir, oldFile));
+      } catch {
+        // ignore
+      }
+    }
+  } catch (err) {
+    console.error('[AetherVault] Automatic backup warning:', err?.message || err);
+  }
+}
+
+runDailyDatabaseBackup();
+setInterval(runDailyDatabaseBackup, 24 * 60 * 60 * 1000).unref();

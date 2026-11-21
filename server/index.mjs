@@ -608,7 +608,15 @@ async function handleApi(req, res, url) {
         return sendJson(res, 429, { error: rateStatus.message });
       }
 
-      const userRow = db.prepare(`SELECT * FROM users WHERE LOWER(name) = LOWER(?)`).get(cleanName);
+      let userRow = db.prepare(`SELECT * FROM users WHERE LOWER(name) = LOWER(?)`).get(cleanName);
+      if (!userRow) {
+        const lowerInput = cleanName.toLowerCase();
+        if (lowerInput === 'josh' || lowerInput === "josh's vault") {
+          userRow = db.prepare(`SELECT * FROM users WHERE id = 1 AND LOWER(name) LIKE 'josh%'`).get();
+        } else if (lowerInput === 'my love') {
+          userRow = db.prepare(`SELECT * FROM users WHERE id = 2 AND LOWER(name) LIKE 'my love%'`).get();
+        }
+      }
       if (!userRow) {
         recordFailedLogin(clientIp, cleanName);
         return sendJson(res, 401, { error: 'Invalid username or password.' });

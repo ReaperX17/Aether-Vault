@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { SEED_CARDS } from './seed.mjs';
 
@@ -333,69 +334,118 @@ if (!initRow) {
     upsertCardCache(c);
   }
 
-  // Only seed sample starter inventory & deck for local desktop mode, not public multi-tenant production
-  if (process.env.NODE_ENV !== 'production') {
-    const insertInv = db.prepare(`
-      INSERT INTO inventory (scryfall_id, name, set_code, collector_number, quantity, finish, condition, language, location, purchase_price, notes)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
+  const snapshotPath = path.join(__dirname, 'owner_vault_snapshot.json.gz');
+  if (fs.existsSync(snapshotPath)) {
+    try {
+      const rawJson = zlib.gunzipSync(fs.readFileSync(snapshotPath)).toString('utf-8');
+      const snap = JSON.parse(rawJson);
 
-    const starterInv = [
-      ["49ec2c19-182f-46b4-828c-3b2a343b7b94", "Atraxa, Praetors' Voice", "2xm", "190", 1, "foil", "NM", "EN", "Commander Box", 22.00, "Pulled from Double Masters VIP"],
-      ["4c02b851-3b7d-4e38-a890-a7d6c2c38f86", "Sol Ring", "cmm", "410", 4, "nonfoil", "NM", "EN", "Staples Binder", 1.25, "Commander staple"],
-      ["f7b5b49b-7080-4051-a2b5-64b0050d2666", "Rhystic Study", "wot", "25", 1, "nonfoil", "NM", "EN", "Staples Binder", 35.00, "Enchanting Tales art"],
-      ["b7a131f4-8e25-445e-965c-15e3c1e7fd43", "Smothering Tithe", "2x2", "31", 2, "nonfoil", "NM", "EN", "Staples Binder", 19.50, ""],
-      ["f9b2e5e2-2928-4e6a-a731-180e8f17a343", "Arcane Signet", "cmm", "367", 6, "nonfoil", "NM", "EN", "Commander Box", 0.75, ""],
-      ["96b6b599-41f8-4b75-9713-77a960303a4b", "Command Tower", "cmm", "415", 5, "nonfoil", "NM", "EN", "Commander Box", 0.25, ""],
-      ["c9d03c22-4090-45f9-9439-b89f87c86117", "Swords to Plowshares", "cmr", "387", 3, "nonfoil", "NM", "EN", "Staples Binder", 1.00, ""],
-      ["ff65e202-212e-4f88-a062-53e25f92c88e", "Counterspell", "mh2", "267", 4, "nonfoil", "NM", "EN", "Staples Binder", 1.20, ""],
-      ["a1b2c3d4-1111-4222-8333-444455556666", "Birds of Paradise", "rvr", "133", 2, "foil", "NM", "EN", "Trade Binder", 8.00, ""],
-      ["b2c3d4e5-2222-4333-8444-555566667777", "Cultivate", "cmm", "279", 3, "nonfoil", "LP", "EN", "Longbox A", 0.40, ""],
-      ["d4e5f6a7-4444-4555-8666-777788889999", "Breeding Pool", "rvr", "275", 1, "nonfoil", "NM", "EN", "Lands Binder", 14.00, "Shockland"]
-    ];
+      db.exec('BEGIN TRANSACTION');
+      try {
+        if (Array.isArray(snap.users)) {
+          const insUser = db.prepare(`
+            INSERT OR REPLACE INTO users (id, name, email, avatar_color, created_at)
+            VALUES (?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
+          `);
+          for (const u of snap.users) {
+            insUser.run(u.id, u.name, u.email || '', u.avatar_color || 'amber', u.created_at || null);
+          }
+        }
 
-    for (const row of starterInv) {
-      insertInv.run(...row);
-    }
+        if (Array.isArray(snap.cards_cache)) {
+          for (const c of snap.cards_cache) {
+            upsertCardCache(c);
+          }
+        }
 
-    const deckResult = db.prepare(`
-      INSERT INTO decks (name, format, description, commander_scryfall_id, cover_image, color_identity, tags)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      "Atraxa's Phyrexian Ascendancy",
-      "commander",
-      "4-Color Witch-Maw proliferate & high-synergy control shell. Includes owned staples and tracks missing cards to acquire.",
-      "49ec2c19-182f-46b4-828c-3b2a343b7b94",
-      "https://cards.scryfall.io/art_crop/front/d/0/d0d33d52-3d28-4635-b985-51e126289259.jpg",
-      JSON.stringify(["W", "U", "B", "G"]),
-      JSON.stringify(["Proliferate", "Midrange", "High Power"])
-    );
+        if (Array.isArray(snap.folders)) {
+          const insFolder = db.prepare(`
+            INSERT OR IGNORE INTO deck_folders (user_id, name, created_at)
+            VALUES (?, ?, COALESCE(?, CURRENT_TIMESTAMP))
+          `);
+          for (const f of snap.folders) {
+            insFolder.run(f.user_id || 1, f.name, f.created_at || null);
+          }
+        }
 
-    const deckId = deckResult.lastInsertRowid;
-    const insertDeckCard = db.prepare(`
-      INSERT INTO deck_cards (deck_id, scryfall_id, name, quantity, board, finish)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `);
+        if (Array.isArray(snap.inventory)) {
+          const insInv = db.prepare(`
+            INSERT OR REPLACE INTO inventory (id, user_id, scryfall_id, name, set_code, collector_number, quantity, finish, condition, language, location, purchase_price, notes, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), COALESCE(?, CURRENT_TIMESTAMP))
+          `);
+          for (const item of snap.inventory) {
+            insInv.run(
+              item.id,
+              item.user_id || 1,
+              item.scryfall_id,
+              item.name,
+              item.set_code || '',
+              item.collector_number || '',
+              item.quantity || 1,
+              item.finish || 'nonfoil',
+              item.condition || 'NM',
+              item.language || 'EN',
+              item.location || 'Main Binder',
+              item.purchase_price ?? null,
+              item.notes || '',
+              item.created_at || null,
+              item.updated_at || null
+            );
+          }
+        }
 
-    const starterDeckCards = [
-      [deckId, "49ec2c19-182f-46b4-828c-3b2a343b7b94", "Atraxa, Praetors' Voice", 1, "commander", "foil"],
-      [deckId, "4c02b851-3b7d-4e38-a890-a7d6c2c38f86", "Sol Ring", 1, "mainboard", "nonfoil"],
-      [deckId, "f9b2e5e2-2928-4e6a-a731-180e8f17a343", "Arcane Signet", 1, "mainboard", "nonfoil"],
-      [deckId, "96b6b599-41f8-4b75-9713-77a960303a4b", "Command Tower", 1, "mainboard", "nonfoil"],
-      [deckId, "f7b5b49b-7080-4051-a2b5-64b0050d2666", "Rhystic Study", 1, "mainboard", "nonfoil"],
-      [deckId, "b7a131f4-8e25-445e-965c-15e3c1e7fd43", "Smothering Tithe", 1, "mainboard", "nonfoil"],
-      [deckId, "c9d03c22-4090-45f9-9439-b89f87c86117", "Swords to Plowshares", 1, "mainboard", "nonfoil"],
-      [deckId, "ff65e202-212e-4f88-a062-53e25f92c88e", "Counterspell", 1, "mainboard", "nonfoil"],
-      [deckId, "a1b2c3d4-1111-4222-8333-444455556666", "Birds of Paradise", 1, "mainboard", "foil"],
-      [deckId, "b2c3d4e5-2222-4333-8444-555566667777", "Cultivate", 1, "mainboard", "nonfoil"],
-      [deckId, "d4e5f6a7-4444-4555-8666-777788889999", "Breeding Pool", 1, "mainboard", "nonfoil"],
-      [deckId, "ff08e1c4-a814-4337-8c00-895de9ab10c6", "Cyclonic Rift", 1, "mainboard", "nonfoil"],
-      [deckId, "0a2f158b-889b-42b0-95b2-06b215206a2b", "Demonic Tutor", 1, "mainboard", "nonfoil"],
-      [deckId, "c3d4e5f6-3333-4444-8555-666677778888", "Teferi's Protection", 1, "mainboard", "nonfoil"]
-    ];
+        if (Array.isArray(snap.decks)) {
+          const insDeck = db.prepare(`
+            INSERT OR REPLACE INTO decks (id, user_id, name, format, folder, description, commander_scryfall_id, partner_scryfall_id, cover_image, color_identity, tags, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), COALESCE(?, CURRENT_TIMESTAMP))
+          `);
+          for (const d of snap.decks) {
+            insDeck.run(
+              d.id,
+              d.user_id || 1,
+              d.name,
+              d.format || 'commander',
+              d.folder || 'Uncategorized',
+              d.description || '',
+              d.commander_scryfall_id || null,
+              d.partner_scryfall_id || null,
+              d.cover_image || null,
+              typeof d.color_identity === 'string' ? d.color_identity : JSON.stringify(d.color_identity || []),
+              typeof d.tags === 'string' ? d.tags : JSON.stringify(d.tags || []),
+              d.created_at || null,
+              d.updated_at || null
+            );
+          }
+        }
 
-    for (const dc of starterDeckCards) {
-      insertDeckCard.run(...dc);
+        if (Array.isArray(snap.deck_cards)) {
+          const insDc = db.prepare(`
+            INSERT OR REPLACE INTO deck_cards (id, deck_id, scryfall_id, name, quantity, board, finish, custom_category, force_buy)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `);
+          for (const dc of snap.deck_cards) {
+            insDc.run(
+              dc.id,
+              dc.deck_id,
+              dc.scryfall_id,
+              dc.name,
+              dc.quantity || 1,
+              dc.board || 'mainboard',
+              dc.finish || 'nonfoil',
+              dc.custom_category || '',
+              dc.force_buy ? 1 : 0
+            );
+          }
+        }
+
+        db.exec('COMMIT');
+        console.log(`[AetherVault] Pre-loaded owner vault snapshot (${snap.inventory?.length || 0} card entries, ${snap.decks?.length || 0} decks).`);
+      } catch (txErr) {
+        db.exec('ROLLBACK');
+        throw txErr;
+      }
+    } catch (snapErr) {
+      console.error('[AetherVault] Failed to load owner snapshot:', snapErr?.message || snapErr);
     }
   }
 

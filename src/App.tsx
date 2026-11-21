@@ -94,6 +94,7 @@ export const App: React.FC = () => {
   const [wifiModalOpen, setWifiModalOpen] = useState(false);
   const [copiedUrl, setCopiedUrl] = useState<string | null>(null);
   const [firewallStatusMsg, setFirewallStatusMsg] = useState<string | null>(null);
+  const [legalModalOpen, setLegalModalOpen] = useState(false);
 
   // Profiles & Authentication state
   const [profilesModalOpen, setProfilesModalOpen] = useState(false);
@@ -1049,6 +1050,33 @@ export const App: React.FC = () => {
               <strong className="text-slate-200">Private &amp; Isolated Library:</strong> Your card collection, binders, and Commander decks are strictly isolated to your account so no other user can view, alter, or delete them.
             </span>
           </div>
+
+          <div className="pt-2 border-t border-slate-800/80 text-[10px] text-slate-500 text-center leading-relaxed space-y-1">
+            <p>
+              AetherVault is unofficial Fan Content permitted under the{' '}
+              <a
+                href="https://company.wizards.com/en/legal/fancontentpolicy"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-slate-400 hover:text-amber-300 underline"
+              >
+                Wizards of the Coast Fan Content Policy
+              </a>
+              . Not approved/endorsed by Wizards. Portions of the materials used are property of Wizards of the Coast. ©Wizards of the Coast LLC.
+            </p>
+            <p>
+              Card data &amp; images provided by{' '}
+              <a
+                href="https://scryfall.com"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-slate-400 hover:text-sky-300 underline"
+              >
+                Scryfall
+              </a>
+              . Not affiliated with Scryfall, TCGplayer, or Card Kingdom.
+            </p>
+          </div>
         </div>
       </div>
     );
@@ -1311,6 +1339,47 @@ export const App: React.FC = () => {
           />
         )}
       </main>
+
+      {/* Official Wizards of the Coast Fan Content Policy & Attribution Footer */}
+      <footer className="border-t border-slate-900 bg-slate-950/90 px-4 pt-5 pb-24 md:pb-6 text-[11px] text-slate-500">
+        <div className="max-w-7xl mx-auto flex flex-col md:flex-row items-center justify-between gap-3 text-center md:text-left">
+          <div className="space-y-1 max-w-3xl leading-relaxed">
+            <p>
+              <strong className="text-slate-400">AetherVault</strong> is unofficial Fan Content permitted under the{' '}
+              <a
+                href="https://company.wizards.com/en/legal/fancontentpolicy"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-slate-400 hover:text-amber-300 underline"
+              >
+                Fan Content Policy
+              </a>
+              . Not approved/endorsed by Wizards. Portions of the materials used are property of Wizards of the Coast. ©Wizards of the Coast LLC.
+            </p>
+            <p>
+              Card data and images are provided by{' '}
+              <a
+                href="https://scryfall.com"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-slate-400 hover:text-sky-300 underline"
+              >
+                Scryfall
+              </a>
+              . Pricing estimates reference TCGplayer and Card Kingdom. AetherVault is an independent tool and is not produced by or endorsed by Scryfall LLC, TCGplayer, or Card Kingdom.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center justify-center gap-3 shrink-0">
+            <button
+              type="button"
+              onClick={() => setLegalModalOpen(true)}
+              className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 font-semibold text-xs cursor-pointer"
+            >
+              Legal, Privacy &amp; Terms
+            </button>
+          </div>
+        </div>
+      </footer>
 
       {/* Mobile Bottom Navigation Bar */}
       <nav className="md:hidden fixed bottom-0 inset-x-0 z-40 bg-slate-950/95 backdrop-blur-lg border-t border-slate-800 px-2 py-1.5 grid grid-cols-4 gap-1">
@@ -2176,6 +2245,109 @@ export const App: React.FC = () => {
                 className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs cursor-pointer"
               >
                 Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Legal, Fan Content Policy, Privacy Policy & Terms Modal */}
+      {legalModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 backdrop-blur-sm p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-2xl w-full p-6 space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto text-xs text-slate-300">
+            <div className="flex items-start justify-between gap-3 border-b border-slate-800 pb-3">
+              <div>
+                <h3 className="text-lg font-bold text-slate-100 flex items-center gap-2">
+                  <ShieldCheck className="w-5 h-5 text-amber-400" />
+                  Legal Notices, Fan Content Policy &amp; Privacy
+                </h3>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Intellectual Property Attribution, Terms of Use, and User Data Privacy for aether-vault.com &amp; aether-vault.net
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setLegalModalOpen(false)}
+                className="px-2.5 py-1 rounded-lg bg-slate-800 text-slate-300 hover:text-white text-xs cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="space-y-3 leading-relaxed">
+              <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-1.5">
+                <div className="font-bold text-amber-300">
+                  1. Wizards of the Coast Fan Content Policy
+                </div>
+                <p className="text-slate-300">
+                  AetherVault is unofficial Fan Content permitted under the{' '}
+                  <a
+                    href="https://company.wizards.com/en/legal/fancontentpolicy"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-amber-300 underline"
+                  >
+                    Wizards of the Coast Fan Content Policy
+                  </a>
+                  . Not approved/endorsed by Wizards. Portions of the materials used are property of Wizards of the Coast. ©Wizards of the Coast LLC.
+                </p>
+                <p className="text-slate-400">
+                  Magic: The Gathering, card names, oracle text, and card artwork are trademarks and copyrights of Wizards of the Coast LLC, a subsidiary of Hasbro, Inc. AetherVault provides free access to all collection and deckbuilding features in compliance with the Fan Content Policy.
+                </p>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-1.5">
+                <div className="font-bold text-sky-300">
+                  2. Scryfall, TCGplayer &amp; Card Kingdom Attribution
+                </div>
+                <p className="text-slate-400">
+                  Card metadata, rulings, and card images are provided via the{' '}
+                  <a
+                    href="https://scryfall.com/docs/api"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-sky-300 underline"
+                  >
+                    Scryfall API
+                  </a>
+                  . Market price references are sourced from Scryfall (TCGplayer USD) and Card Kingdom&apos;s public pricelist API. AetherVault is independent and is not affiliated with, produced by, or endorsed by Scryfall LLC, TCGplayer, or Card Kingdom.All prices are estimates and not offers to buy or sell.
+                </p>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-1.5">
+                <div className="font-bold text-emerald-300">
+                  3. Privacy Policy &amp; User Data Protection
+                </div>
+                <ul className="list-disc list-inside space-y-1 text-slate-400">
+                  <li>
+                    <strong className="text-slate-200">Minimal Data Collection:</strong> We only store your chosen username, your recovery email address, a salted <code className="text-slate-300">scrypt</code> hash of your password, and the card inventory and decklists you save in your vault.
+                  </li>
+                  <li>
+                    <strong className="text-slate-200">Zero Selling or Tracking:</strong> We do not sell, rent, or share your email address or collection data with third parties, and we do not use third-party advertising trackers.
+                  </li>
+                  <li>
+                    <strong className="text-slate-200">Data Export &amp; Deletion:</strong> You own your collection data. You can download a complete JSON/CSV backup of your vault or permanently delete your account and all associated cards and decks at any time from the <strong className="text-slate-200">Vault Account &amp; Security</strong> menu.
+                  </li>
+                </ul>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-1.5">
+                <div className="font-bold text-slate-200">
+                  4. Terms of Use
+                </div>
+                <p className="text-slate-400">
+                  AetherVault is provided &ldquo;as is&rdquo; without warranty of any kind. Users are responsible for maintaining backups of their collection data using the built-in export tools and keeping their account password secure.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex justify-end pt-2">
+              <button
+                type="button"
+                onClick={() => setLegalModalOpen(false)}
+                className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs cursor-pointer"
+              >
+                Close
               </button>
             </div>
           </div>

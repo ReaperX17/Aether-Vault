@@ -22,6 +22,11 @@ import {
   isRelentlessCard,
   parseImportPayload
 } from './deck_utils.mjs';
+import {
+  sendVerificationEmail,
+  sendPasswordResetEmail,
+  isEmailProviderConfigured
+} from './mailer.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 3000);
@@ -74,6 +79,27 @@ function verifyPassword(password, storedHash, storedSalt, legacyPin = '') {
 
 function hashSessionToken(rawToken) {
   return crypto.createHash('sha256').update(String(rawToken)).digest('hex');
+}
+
+function isValidEmail(email) {
+  const clean = String(email || '').trim();
+  return clean.length >= 5 && clean.length <= 120 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(clean);
+}
+
+function generateSixDigitCode() {
+  return String(crypto.randomInt(100000, 1000000));
+}
+
+function maskEmailAddress(email) {
+  const clean = String(email || '').trim();
+  const parts = clean.split('@');
+  if (parts.length !== 2) return clean;
+  const local = parts[0];
+  const maskedLocal =
+    local.length <= 2
+      ? `${local[0] || '*'}*`
+      : `${local.slice(0, 2)}${'*'.repeat(Math.min(5, local.length - 2))}`;
+  return `${maskedLocal}@${parts[1]}`;
 }
 
 function createSession(userId) {
@@ -308,8 +334,8 @@ function getLanNetworkInfo() {
 
 function getAllUsersWithStats(onlyUserId = null) {
   const users = onlyUserId
-    ? db.prepare(`SELECT id, name, email, avatar_color, pin_code, password_hash, created_at FROM users WHERE id = ?`).all(Number(onlyUserId))
-    : db.prepare(`SELECT id, name, email, avatar_color, pin_code, password_hash, created_at FROM users ORDER BY id ASC`).all();
+    ? db.prepare(`SELECT id, name, email, COALESCE(email_verified, 0) as email_verified, avatar_color, pin_code, password_hash, created_at FROM users WHERE id = ?`).all(Number(onlyUserId))
+    : db.prepare(`SELECT id, name, email, COALESCE(email_verified, 0) as email_verified, avatar_color, pin_code, password_hash, created_at FROM users ORDER BY id ASC`).all();
   const invStats = db.prepare(`SELECT COALESCE(user_id, 1) as uid, COALESCE(SUM(quantity), 0) as totalCards, COUNT(*) as uniqueEntries FROM inventory GROUP BY COALESCE(user_id, 1)`).all();
   const deckStats = db.prepare(`SELECT COALESCE(user_id, 1) as uid, COUNT(*) as totalDecks FROM decks GROUP BY COALESCE(user_id, 1)`).all();
   const invMap = new Map(invStats.map(r => [Number(r.uid), r]));
@@ -326,6 +352,7 @@ function getAllUsersWithStats(onlyUserId = null) {
       id: uid,
       name: u.name,
       email: u.email || '',
+      email_verified: Boolean(u.email_verified),
       avatar_color: u.avatar_color || 'amber',
       has_pin: hasPassword,
       has_password: hasPassword,
@@ -558,10 +585,13 @@ async function handleApi(req, res, url) {
       const cleanName = String(body.username || body.name || '').trim();
       const rawPassword = String(body.password || body.pin_code || '');
       const avatarColor = String(body.avatar_color || 'amber').trim() || 'amber';
-      const email = String(body.email || '').trim().slice(0, 120);
+      const email = String(body.email || '').trim().toLowerCase().slice(0, 120);
 
       if (cleanName.length < 2 || cleanName.length > 40) {
         return sendJson(res, 400, { error: 'Username must be between 2 and 40 characters.' });
+      }
+      if (!isValidEmail(email)) {
+        return sendJson(res, 400, { error: 'A valid email address is required for email verification and password recovery.' });
       }
       if (rawPassword.length < 4) {
         return sendJson(res, 400, { error: 'Password must be at least 4 characters long to protect your vault.' });
@@ -572,13 +602,33 @@ async function handleApi(req, res, url) {
         return sendJson(res, 400, { error: 'That username is already registered. Please sign in or pick another username.' });
       }
 
+      const existingEmail = db.prepare(`SELECT id FROM users WHERE email != '' AND LOWER(email) = LOWER(?)`).get(email);
+      if (existingEmail) {
+        return sendJson(res, 400, { error: 'That email address is already registered to an account. Please sign in or use Password Recovery.' });
+      }
+
       const { hash, salt } = hashPassword(rawPassword);
+      const verifyCode = generateSixDigitCode();
+      const verifyCodeHash = hashSessionToken(verifyCode);
+      const verifyExpiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+
       const ins = db
-        .prepare(`INSERT INTO users (name, email, avatar_color, password_hash, password_salt, pin_code) VALUES (?, ?, ?, ?, ?, '')`)
-        .run(cleanName, email, avatarColor, hash, salt);
+        .prepare(
+          `INSERT INTO users (name, email, email_verified, verification_code_hash, verification_code_expires_at, avatar_color, password_hash, password_salt, pin_code)
+           VALUES (?, ?, 0, ?, ?, ?, ?, ?, '')`
+        )
+        .run(cleanName, email, verifyCodeHash, verifyExpiresAt, avatarColor, hash, salt);
       const newUserId = Number(ins.lastInsertRowid);
       const token = createSession(newUserId);
       const userObj = getSingleUserWithStats(newUserId);
+
+      let mailResult = { delivered: false, provider: 'console-preview' };
+      try {
+        mailResult = await sendVerificationEmail(email, cleanName, verifyCode);
+      } catch (mailErr) {
+        console.error('[AetherVault] Verification email error:', mailErr?.message || mailErr);
+      }
+
       const cookieHeader = `aethervault_session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=7776000${auth.isPublic ? '; Secure' : ''}`;
 
       return sendJson(
@@ -588,7 +638,10 @@ async function handleApi(req, res, url) {
           authenticated: true,
           token,
           user: userObj,
-          isPublic: auth.isPublic
+          isPublic: auth.isPublic,
+          verificationSent: true,
+          emailDelivered: mailResult.delivered,
+          devPreviewCode: mailResult.delivered ? undefined : verifyCode
         },
         { 'Set-Cookie': cookieHeader }
       );
@@ -600,7 +653,7 @@ async function handleApi(req, res, url) {
       const rawPassword = String(body.password || body.pin_code || '');
 
       if (!cleanName) {
-        return sendJson(res, 400, { error: 'Please enter your username.' });
+        return sendJson(res, 400, { error: 'Please enter your username or email address.' });
       }
 
       const rateStatus = checkLoginRateLimit(clientIp, cleanName);
@@ -608,7 +661,9 @@ async function handleApi(req, res, url) {
         return sendJson(res, 429, { error: rateStatus.message });
       }
 
-      let userRow = db.prepare(`SELECT * FROM users WHERE LOWER(name) = LOWER(?)`).get(cleanName);
+      let userRow = db
+        .prepare(`SELECT * FROM users WHERE LOWER(name) = LOWER(?) OR (email != '' AND LOWER(email) = LOWER(?))`)
+        .get(cleanName, cleanName);
       if (!userRow) {
         const lowerInput = cleanName.toLowerCase();
         if (lowerInput === 'josh' || lowerInput === "josh's vault") {
@@ -619,7 +674,7 @@ async function handleApi(req, res, url) {
       }
       if (!userRow) {
         recordFailedLogin(clientIp, cleanName);
-        return sendJson(res, 401, { error: 'Invalid username or password.' });
+        return sendJson(res, 401, { error: 'Invalid username/email or password.' });
       }
 
       const hasPassword = Boolean(
@@ -748,6 +803,241 @@ async function handleApi(req, res, url) {
         user: getSingleUserWithStats(auth.userId),
         message: 'Your vault password has been updated.'
       });
+    }
+
+    // 0-email. Email Verification & Password Recovery Endpoints
+    if (pathname === '/api/auth/send-verification' && method === 'POST') {
+      if (!auth.authenticated || !auth.userId) {
+        return sendJson(res, 401, { error: 'Please sign in first.', requireAuth: true });
+      }
+      const body = await readJsonBody(req);
+      const userRow = db.prepare(`SELECT * FROM users WHERE id = ?`).get(auth.userId);
+      if (!userRow) return sendJson(res, 404, { error: 'Account not found.' });
+
+      const targetEmail = String(body.email !== undefined ? body.email : userRow.email || '')
+        .trim()
+        .toLowerCase();
+      if (!isValidEmail(targetEmail)) {
+        return sendJson(res, 400, { error: 'Please enter a valid email address.' });
+      }
+
+      const conflict = db
+        .prepare(`SELECT id FROM users WHERE email != '' AND LOWER(email) = LOWER(?) AND id != ?`)
+        .get(targetEmail, auth.userId);
+      if (conflict) {
+        return sendJson(res, 400, { error: 'That email address is already linked to another account.' });
+      }
+
+      const verifyCode = generateSixDigitCode();
+      const verifyCodeHash = hashSessionToken(verifyCode);
+      const verifyExpiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+
+      db.prepare(
+        `UPDATE users
+         SET email = ?, email_verified = 0, verification_code_hash = ?, verification_code_expires_at = ?
+         WHERE id = ?`
+      ).run(targetEmail, verifyCodeHash, verifyExpiresAt, auth.userId);
+
+      let mailResult = { delivered: false, provider: 'console-preview' };
+      try {
+        mailResult = await sendVerificationEmail(targetEmail, userRow.name, verifyCode);
+      } catch (mailErr) {
+        console.error('[AetherVault] Verification email error:', mailErr?.message || mailErr);
+      }
+
+      return sendJson(res, 200, {
+        ok: true,
+        email: targetEmail,
+        user: getSingleUserWithStats(auth.userId),
+        emailDelivered: mailResult.delivered,
+        devPreviewCode: mailResult.delivered ? undefined : verifyCode,
+        message: mailResult.delivered
+          ? `Sent a 6-digit verification code to ${targetEmail}.`
+          : `Verification code generated for ${targetEmail}.`
+      });
+    }
+
+    if (pathname === '/api/auth/verify-email' && method === 'POST') {
+      if (!auth.authenticated || !auth.userId) {
+        return sendJson(res, 401, { error: 'Please sign in first.', requireAuth: true });
+      }
+      const body = await readJsonBody(req);
+      const rawCode = String(body.code || '').trim();
+      if (!/^\d{6}$/.test(rawCode)) {
+        return sendJson(res, 400, { error: 'Please enter the 6-digit verification code.' });
+      }
+
+      const userRow = db.prepare(`SELECT * FROM users WHERE id = ?`).get(auth.userId);
+      if (!userRow || !userRow.email) {
+        return sendJson(res, 400, { error: 'Please save an email address on your account first.' });
+      }
+
+      if (!userRow.verification_code_hash || !userRow.verification_code_expires_at) {
+        return sendJson(res, 400, { error: 'No active verification code found. Click "Send Verification Code" to get a new one.' });
+      }
+
+      if (new Date(userRow.verification_code_expires_at) < new Date()) {
+        return sendJson(res, 400, { error: 'Verification code has expired. Click "Send Verification Code" to get a fresh one.' });
+      }
+
+      if (hashSessionToken(rawCode) !== userRow.verification_code_hash) {
+        return sendJson(res, 400, { error: 'Invalid 6-digit verification code.' });
+      }
+
+      db.prepare(
+        `UPDATE users
+         SET email_verified = 1, verification_code_hash = '', verification_code_expires_at = ''
+         WHERE id = ?`
+      ).run(auth.userId);
+
+      const updatedUser = getSingleUserWithStats(auth.userId);
+      const visibleUsers = auth.isPublic ? [updatedUser] : getAllUsersWithStats();
+      return sendJson(res, 200, {
+        ok: true,
+        user: updatedUser,
+        users: visibleUsers,
+        message: 'Email verified! Password recovery is now active on your account.'
+      });
+    }
+
+    if (pathname === '/api/auth/forgot-password' && method === 'POST') {
+      const body = await readJsonBody(req);
+      const identifier = String(body.identifier || body.email || body.username || '').trim();
+      if (!identifier) {
+        return sendJson(res, 400, { error: 'Please enter your email address or username.' });
+      }
+
+      const rateStatus = checkLoginRateLimit(clientIp, `forgot:${identifier}`);
+      if (!rateStatus.allowed) {
+        return sendJson(res, 429, { error: rateStatus.message });
+      }
+
+      let userRow = db
+        .prepare(`SELECT * FROM users WHERE (email != '' AND LOWER(email) = LOWER(?)) OR LOWER(name) = LOWER(?)`)
+        .get(identifier, identifier);
+      if (!userRow) {
+        const lowerInput = identifier.toLowerCase();
+        if (lowerInput === 'josh' || lowerInput === "josh's vault") {
+          userRow = db.prepare(`SELECT * FROM users WHERE id = 1 AND LOWER(name) LIKE 'josh%'`).get();
+        } else if (lowerInput === 'my love') {
+          userRow = db.prepare(`SELECT * FROM users WHERE id = 2 AND LOWER(name) LIKE 'my love%'`).get();
+        }
+      }
+
+      if (!userRow) {
+        recordFailedLogin(clientIp, `forgot:${identifier}`);
+        return sendJson(res, 404, { error: 'No account found with that email address or username.' });
+      }
+
+      if (!userRow.email || !isValidEmail(userRow.email)) {
+        return sendJson(res, 400, {
+          error: `The account "${userRow.name}" does not have a recovery email address saved yet. Please sign in with your username to add one.`
+        });
+      }
+
+      const resetCode = generateSixDigitCode();
+      const resetCodeHash = hashSessionToken(resetCode);
+      const resetExpiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+
+      db.prepare(
+        `UPDATE users SET reset_code_hash = ?, reset_code_expires_at = ? WHERE id = ?`
+      ).run(resetCodeHash, resetExpiresAt, userRow.id);
+
+      let mailResult = { delivered: false, provider: 'console-preview' };
+      try {
+        mailResult = await sendPasswordResetEmail(userRow.email, userRow.name, resetCode);
+      } catch (mailErr) {
+        console.error('[AetherVault] Password reset email error:', mailErr?.message || mailErr);
+      }
+
+      const masked = maskEmailAddress(userRow.email);
+      return sendJson(res, 200, {
+        ok: true,
+        maskedEmail: masked,
+        emailDelivered: mailResult.delivered,
+        devPreviewCode: mailResult.delivered ? undefined : resetCode,
+        message: mailResult.delivered
+          ? `Sent a 6-digit password recovery code to ${masked}.`
+          : `Generated a 6-digit password recovery code for ${masked}.`
+      });
+    }
+
+    if (pathname === '/api/auth/reset-password' && method === 'POST') {
+      const body = await readJsonBody(req);
+      const identifier = String(body.identifier || body.email || body.username || '').trim();
+      const rawCode = String(body.code || '').trim();
+      const newPassword = String(body.newPassword || '');
+
+      if (!identifier) {
+        return sendJson(res, 400, { error: 'Please enter your email address or username.' });
+      }
+      if (!/^\d{6}$/.test(rawCode)) {
+        return sendJson(res, 400, { error: 'Please enter the 6-digit recovery code.' });
+      }
+      if (newPassword.length < 4) {
+        return sendJson(res, 400, { error: 'New password must be at least 4 characters long.' });
+      }
+
+      const rateStatus = checkLoginRateLimit(clientIp, `reset:${identifier}`);
+      if (!rateStatus.allowed) {
+        return sendJson(res, 429, { error: rateStatus.message });
+      }
+
+      let userRow = db
+        .prepare(`SELECT * FROM users WHERE (email != '' AND LOWER(email) = LOWER(?)) OR LOWER(name) = LOWER(?)`)
+        .get(identifier, identifier);
+      if (!userRow) {
+        const lowerInput = identifier.toLowerCase();
+        if (lowerInput === 'josh' || lowerInput === "josh's vault") {
+          userRow = db.prepare(`SELECT * FROM users WHERE id = 1 AND LOWER(name) LIKE 'josh%'`).get();
+        } else if (lowerInput === 'my love') {
+          userRow = db.prepare(`SELECT * FROM users WHERE id = 2 AND LOWER(name) LIKE 'my love%'`).get();
+        }
+      }
+
+      if (!userRow || !userRow.reset_code_hash || !userRow.reset_code_expires_at) {
+        recordFailedLogin(clientIp, `reset:${identifier}`);
+        return sendJson(res, 400, { error: 'Invalid or expired recovery code. Please request a new code.' });
+      }
+
+      if (new Date(userRow.reset_code_expires_at) < new Date()) {
+        return sendJson(res, 400, { error: 'Recovery code has expired (valid for 15 minutes). Please request a new code.' });
+      }
+
+      if (hashSessionToken(rawCode) !== userRow.reset_code_hash) {
+        recordFailedLogin(clientIp, `reset:${identifier}`);
+        return sendJson(res, 400, { error: 'Incorrect 6-digit recovery code.' });
+      }
+
+      clearLoginAttempts(clientIp, `reset:${identifier}`);
+      clearLoginAttempts(clientIp, identifier);
+
+      const { hash, salt } = hashPassword(newPassword);
+      db.prepare(
+        `UPDATE users
+         SET password_hash = ?, password_salt = ?, pin_code = '', email_verified = 1, reset_code_hash = '', reset_code_expires_at = ''
+         WHERE id = ?`
+      ).run(hash, salt, userRow.id);
+
+      // Revoke all old sessions and issue a fresh session
+      db.prepare(`DELETE FROM user_sessions WHERE user_id = ?`).run(userRow.id);
+      const token = createSession(Number(userRow.id));
+      const userObj = getSingleUserWithStats(Number(userRow.id));
+      const cookieHeader = `aethervault_session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=7776000${auth.isPublic ? '; Secure' : ''}`;
+
+      return sendJson(
+        res,
+        200,
+        {
+          ok: true,
+          authenticated: true,
+          token,
+          user: userObj,
+          isPublic: auth.isPublic,
+          message: 'Password reset! You are now signed in.'
+        },
+        { 'Set-Cookie': cookieHeader }
+      );
     }
 
     // 0a. Local LAN Network & Desktop Endpoints (disabled on public multi-tenant hosts)
@@ -1006,33 +1296,57 @@ async function handleApi(req, res, url) {
     if (pathname === '/api/users' && method === 'POST') {
       const body = await readJsonBody(req);
       const cleanName = String(body.name || body.username || '').trim();
+      const email = String(body.email || '').trim().toLowerCase().slice(0, 120);
       const avatarColor = String(body.avatar_color || 'sky').trim() || 'sky';
       const rawPassword = String(body.password || body.pin_code || '').trim();
-      if (!cleanName) {
-        return sendJson(res, 400, { error: 'Profile name is required.' });
+      if (!cleanName || cleanName.length < 2) {
+        return sendJson(res, 400, { error: 'Username must be at least 2 characters.' });
       }
-      if (auth.isPublic && rawPassword.length < 4) {
+      if (!isValidEmail(email)) {
+        return sendJson(res, 400, { error: 'A valid email address is required for verification and password recovery.' });
+      }
+      if (rawPassword.length < 4) {
         return sendJson(res, 400, { error: 'A password of at least 4 characters is required.' });
       }
       const existing = db.prepare(`SELECT id FROM users WHERE LOWER(name) = LOWER(?)`).get(cleanName);
       if (existing) {
-        return sendJson(res, 400, { error: 'An account with that name already exists.' });
+        return sendJson(res, 400, { error: 'An account with that username already exists.' });
       }
-      let hash = '';
-      let salt = '';
-      if (rawPassword.length > 0) {
-        const hashed = hashPassword(rawPassword);
-        hash = hashed.hash;
-        salt = hashed.salt;
+      const existingEmail = db.prepare(`SELECT id FROM users WHERE email != '' AND LOWER(email) = LOWER(?)`).get(email);
+      if (existingEmail) {
+        return sendJson(res, 400, { error: 'That email address is already registered to another account.' });
       }
+      const { hash, salt } = hashPassword(rawPassword);
+      const verifyCode = generateSixDigitCode();
+      const verifyCodeHash = hashSessionToken(verifyCode);
+      const verifyExpiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+
       const ins = db
-        .prepare(`INSERT INTO users (name, avatar_color, password_hash, password_salt, pin_code) VALUES (?, ?, ?, ?, '')`)
-        .run(cleanName, avatarColor, hash, salt);
+        .prepare(
+          `INSERT INTO users (name, email, email_verified, verification_code_hash, verification_code_expires_at, avatar_color, password_hash, password_salt, pin_code)
+           VALUES (?, ?, 0, ?, ?, ?, ?, ?, '')`
+        )
+        .run(cleanName, email, verifyCodeHash, verifyExpiresAt, avatarColor, hash, salt);
       const newId = Number(ins.lastInsertRowid);
       const token = createSession(newId);
+
+      let mailResult = { delivered: false, provider: 'console-preview' };
+      try {
+        mailResult = await sendVerificationEmail(email, cleanName, verifyCode);
+      } catch {
+        // ignore mail error
+      }
+
       const created = getSingleUserWithStats(newId);
       const visibleUsers = auth.isPublic ? [created] : getAllUsersWithStats();
-      return sendJson(res, 201, { user: created, token, users: visibleUsers });
+      return sendJson(res, 201, {
+        user: created,
+        token,
+        users: visibleUsers,
+        verificationSent: true,
+        emailDelivered: mailResult.delivered,
+        devPreviewCode: mailResult.delivered ? undefined : verifyCode
+      });
     }
 
     const userItemMatch = pathname.match(/^\/api\/users\/(\d+)$/);
@@ -1050,21 +1364,76 @@ async function handleApi(req, res, url) {
       if (method === 'PATCH') {
         const body = await readJsonBody(req);
         const nextName = body.name !== undefined ? String(body.name).trim() || existingUser.name : existingUser.name;
+        if (nextName.length < 2 || nextName.length > 40) {
+          return sendJson(res, 400, { error: 'Username must be between 2 and 40 characters.' });
+        }
         if (nextName.toLowerCase() !== existingUser.name.toLowerCase()) {
           const conflict = db.prepare(`SELECT id FROM users WHERE LOWER(name) = LOWER(?) AND id != ?`).get(nextName, targetUserId);
           if (conflict) {
             return sendJson(res, 400, { error: 'That username is already taken.' });
           }
         }
+
+        let nextEmail = existingUser.email || '';
+        let emailChanged = false;
+        if (body.email !== undefined) {
+          const cleanEmail = String(body.email || '').trim().toLowerCase().slice(0, 120);
+          if (cleanEmail && !isValidEmail(cleanEmail)) {
+            return sendJson(res, 400, { error: 'Please enter a valid email address.' });
+          }
+          if (cleanEmail && cleanEmail !== (existingUser.email || '').toLowerCase()) {
+            const emailConflict = db
+              .prepare(`SELECT id FROM users WHERE email != '' AND LOWER(email) = LOWER(?) AND id != ?`)
+              .get(cleanEmail, targetUserId);
+            if (emailConflict) {
+              return sendJson(res, 400, { error: 'That email address is already linked to another account.' });
+            }
+            emailChanged = true;
+          }
+          nextEmail = cleanEmail;
+        }
+
         const nextColor = body.avatar_color ?? existingUser.avatar_color;
-        db.prepare(`UPDATE users SET name = ?, avatar_color = ? WHERE id = ?`).run(
-          nextName,
-          nextColor,
-          targetUserId
-        );
+        let verificationSent = false;
+        let emailDelivered = false;
+        let devPreviewCode;
+
+        if (emailChanged && nextEmail) {
+          const verifyCode = generateSixDigitCode();
+          const verifyCodeHash = hashSessionToken(verifyCode);
+          const verifyExpiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+          db.prepare(
+            `UPDATE users
+             SET name = ?, email = ?, email_verified = 0, verification_code_hash = ?, verification_code_expires_at = ?, avatar_color = ?
+             WHERE id = ?`
+          ).run(nextName, nextEmail, verifyCodeHash, verifyExpiresAt, nextColor, targetUserId);
+
+          verificationSent = true;
+          try {
+            const mailRes = await sendVerificationEmail(nextEmail, nextName, verifyCode);
+            emailDelivered = mailRes.delivered;
+            if (!mailRes.delivered) devPreviewCode = verifyCode;
+          } catch {
+            devPreviewCode = verifyCode;
+          }
+        } else {
+          db.prepare(`UPDATE users SET name = ?, email = ?, avatar_color = ? WHERE id = ?`).run(
+            nextName,
+            nextEmail,
+            nextColor,
+            targetUserId
+          );
+        }
+
         const updatedUser = getSingleUserWithStats(targetUserId);
         const visibleUsers = auth.isPublic ? [updatedUser] : getAllUsersWithStats();
-        return sendJson(res, 200, { user: updatedUser, users: visibleUsers });
+        return sendJson(res, 200, {
+          user: updatedUser,
+          users: visibleUsers,
+          verificationSent,
+          emailDelivered,
+          devPreviewCode
+        });
       }
 
       if (method === 'DELETE') {

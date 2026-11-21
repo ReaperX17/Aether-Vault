@@ -198,6 +198,7 @@ export interface UserProfile {
   id: number;
   name: string;
   email?: string;
+  email_verified?: boolean;
   avatar_color: string;
   has_pin?: boolean;
   has_password?: boolean;

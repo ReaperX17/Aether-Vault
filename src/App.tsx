@@ -23,7 +23,8 @@ import {
   LogOut,
   KeyRound,
   UserPlus,
-  Download
+  Download,
+  Mail
 } from 'lucide-react';
 import { BoardType, DashboardData, DeckSummary, InventoryItem, NetworkInfo, UserProfile } from './types';
 import { DashboardView } from './components/DashboardView';
@@ -97,6 +98,7 @@ export const App: React.FC = () => {
   // Profiles & Authentication state
   const [profilesModalOpen, setProfilesModalOpen] = useState(false);
   const [newProfileName, setNewProfileName] = useState('');
+  const [newProfileEmail, setNewProfileEmail] = useState('');
   const [newProfileColor, setNewProfileColor] = useState('emerald');
   const [newProfilePin, setNewProfilePin] = useState('');
   const [editingProfileId, setEditingProfileId] = useState<number | null>(null);
@@ -109,12 +111,28 @@ export const App: React.FC = () => {
   const [authChecking, setAuthChecking] = useState(true);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isPublicServer, setIsPublicServer] = useState(false);
-  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [authMode, setAuthMode] = useState<'login' | 'register' | 'forgot'>('login');
   const [authUsername, setAuthUsername] = useState('');
+  const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
   const [authColor, setAuthColor] = useState('amber');
   const [authError, setAuthError] = useState<string | null>(null);
+  const [authSuccessMsg, setAuthSuccessMsg] = useState<string | null>(null);
   const [authSubmitting, setAuthSubmitting] = useState(false);
+
+  // Password Recovery (Forgot Password) state
+  const [forgotIdentifier, setForgotIdentifier] = useState('');
+  const [forgotCodeSent, setForgotCodeSent] = useState(false);
+  const [forgotMaskedEmail, setForgotMaskedEmail] = useState('');
+  const [forgotCode, setForgotCode] = useState('');
+  const [forgotNewPassword, setForgotNewPassword] = useState('');
+  const [devResetCodePreview, setDevResetCodePreview] = useState<string | null>(null);
+
+  // Dedicated Change Username, Email & Email Verification state
+  const [accountUsernameInput, setAccountUsernameInput] = useState('');
+  const [accountEmailInput, setAccountEmailInput] = useState('');
+  const [verificationCodeInput, setVerificationCodeInput] = useState('');
+  const [devVerificationCodePreview, setDevVerificationCodePreview] = useState<string | null>(null);
 
   // Password Change state
   const [currentPasswordInput, setCurrentPasswordInput] = useState('');
@@ -331,17 +349,30 @@ export const App: React.FC = () => {
     };
   const activeColorStyle = AVATAR_COLOR_MAP[activeUserProfile.avatar_color] || AVATAR_COLOR_MAP.amber;
 
+  useEffect(() => {
+    setAccountUsernameInput(activeUserProfile.name || '');
+    setAccountEmailInput(activeUserProfile.email || '');
+  }, [activeUserProfile.id, activeUserProfile.name, activeUserProfile.email]);
+
   async function handleAuthSubmit(e: React.FormEvent) {
     e.preventDefault();
     setAuthError(null);
+    setAuthSuccessMsg(null);
     const trimmedUser = authUsername.trim();
     if (!trimmedUser) {
-      setAuthError('Please enter your username.');
+      setAuthError(authMode === 'register' ? 'Please enter a username.' : 'Please enter your username or email address.');
       return;
     }
-    if (authMode === 'register' && authPassword.length < 4) {
-      setAuthError('Please choose a password of at least 4 characters to protect your vault.');
-      return;
+    if (authMode === 'register') {
+      const trimmedEmail = authEmail.trim();
+      if (!trimmedEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
+        setAuthError('A valid email address is required for verification and password recovery.');
+        return;
+      }
+      if (authPassword.length < 4) {
+        setAuthError('Please choose a password of at least 4 characters to protect your vault.');
+        return;
+      }
     }
 
     setAuthSubmitting(true);
@@ -352,6 +383,7 @@ export const App: React.FC = () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           username: trimmedUser,
+          email: authMode === 'register' ? authEmail.trim() : undefined,
           password: authPassword,
           avatar_color: authColor
         })
@@ -367,17 +399,205 @@ export const App: React.FC = () => {
         saveUserSessionToken(json.user.id, json.token);
         setActiveUserId(json.user.id);
       }
+      if (json.devPreviewCode) {
+        setDevVerificationCodePreview(json.devPreviewCode);
+      }
       setAuthPassword('');
       setIsAuthenticated(true);
       setSelectedDeckId(null);
       setInventoryLocationFilter('ALL');
-      setProfilesModalOpen(false);
       await fetchAllData();
+
+      if (authMode === 'register' && json.verificationSent) {
+        setProfileErrorMsg(null);
+        setProfileSuccessMsg(
+          json.emailDelivered
+            ? `Account created! We sent a 6-digit verification code to ${authEmail.trim()}. Enter it below to verify your email.`
+            : `Account created! Enter your 6-digit verification code (${json.devPreviewCode}) below to complete email verification.`
+        );
+        setProfilesModalOpen(true);
+      } else {
+        setProfilesModalOpen(false);
+      }
     } catch {
       setAuthError('Unable to reach AetherVault server. Please try again.');
     } finally {
       setAuthSubmitting(false);
     }
+  }
+
+  async function handleSendForgotCode(e: React.FormEvent) {
+    e.preventDefault();
+    setAuthError(null);
+    setAuthSuccessMsg(null);
+    setDevResetCodePreview(null);
+    const trimmed = forgotIdentifier.trim();
+    if (!trimmed) {
+      setAuthError('Please enter your email address or username.');
+      return;
+    }
+    setAuthSubmitting(true);
+    try {
+      const res = await fetch('/api/auth/forgot-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identifier: trimmed })
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        setAuthError(json.error || 'Could not send recovery code.');
+        setAuthSubmitting(false);
+        return;
+      }
+      setForgotCodeSent(true);
+      setForgotMaskedEmail(json.maskedEmail || trimmed);
+      if (json.devPreviewCode) {
+        setDevResetCodePreview(json.devPreviewCode);
+      }
+      setAuthSuccessMsg(json.message || 'Sent 6-digit recovery code!');
+    } catch {
+      setAuthError('Unable to reach AetherVault server.');
+    } finally {
+      setAuthSubmitting(false);
+    }
+  }
+
+  async function handleResetPasswordWithCode(e: React.FormEvent) {
+    e.preventDefault();
+    setAuthError(null);
+    setAuthSuccessMsg(null);
+    if (!/^\d{6}$/.test(forgotCode.trim())) {
+      setAuthError('Please enter the 6-digit recovery code.');
+      return;
+    }
+    if (forgotNewPassword.length < 4) {
+      setAuthError('New password must be at least 4 characters long.');
+      return;
+    }
+    setAuthSubmitting(true);
+    try {
+      const res = await fetch('/api/auth/reset-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          identifier: forgotIdentifier.trim(),
+          code: forgotCode.trim(),
+          newPassword: forgotNewPassword
+        })
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        setAuthError(json.error || 'Could not reset password.');
+        setAuthSubmitting(false);
+        return;
+      }
+      if (json.user && json.token) {
+        saveUserSessionToken(json.user.id, json.token);
+        setActiveUserId(json.user.id);
+      }
+      setForgotCode('');
+      setForgotNewPassword('');
+      setForgotCodeSent(false);
+      setDevResetCodePreview(null);
+      setIsAuthenticated(true);
+      await fetchAllData();
+    } catch {
+      setAuthError('Unable to reach AetherVault server.');
+    } finally {
+      setAuthSubmitting(false);
+    }
+  }
+
+  async function handleSaveUsernameAndEmail(e: React.FormEvent) {
+    e.preventDefault();
+    setProfileErrorMsg(null);
+    setProfileSuccessMsg(null);
+    const nextName = accountUsernameInput.trim();
+    const nextEmail = accountEmailInput.trim().toLowerCase();
+    if (nextName.length < 2) {
+      setProfileErrorMsg('Username must be at least 2 characters.');
+      return;
+    }
+    if (!nextEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(nextEmail)) {
+      setProfileErrorMsg('Please enter a valid email address for password recovery.');
+      return;
+    }
+
+    const res = await fetch(`/api/users/${activeUserId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: nextName,
+        email: nextEmail
+      })
+    });
+    const json = await res.json();
+    if (!res.ok) {
+      setProfileErrorMsg(json.error || 'Could not update account settings.');
+      return;
+    }
+    if (Array.isArray(json.users)) setUserProfiles(json.users);
+    if (json.devPreviewCode) {
+      setDevVerificationCodePreview(json.devPreviewCode);
+    }
+    if (json.verificationSent) {
+      setProfileSuccessMsg(
+        json.emailDelivered
+          ? `Saved! We sent a 6-digit verification code to ${nextEmail}. Enter it below to verify your email.`
+          : `Saved! Enter the 6-digit verification code (${json.devPreviewCode}) below to verify ${nextEmail}.`
+      );
+    } else {
+      setProfileSuccessMsg('Username and email updated!');
+    }
+  }
+
+  async function handleSendVerificationCode() {
+    setProfileErrorMsg(null);
+    setProfileSuccessMsg(null);
+    const targetEmail = accountEmailInput.trim().toLowerCase() || activeUserProfile.email || '';
+    if (!targetEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(targetEmail)) {
+      setProfileErrorMsg('Please enter a valid email address above first.');
+      return;
+    }
+    const res = await fetch('/api/auth/send-verification', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: targetEmail })
+    });
+    const json = await res.json();
+    if (!res.ok) {
+      setProfileErrorMsg(json.error || 'Could not send verification code.');
+      return;
+    }
+    if (json.devPreviewCode) {
+      setDevVerificationCodePreview(json.devPreviewCode);
+    }
+    setProfileSuccessMsg(
+      json.emailDelivered
+        ? `Sent a 6-digit verification code to ${targetEmail}!`
+        : `Verification code generated (${json.devPreviewCode}) — enter it below to verify!`
+    );
+    await fetchUsersAndNetwork();
+  }
+
+  async function handleVerifyEmailCode(e: React.FormEvent) {
+    e.preventDefault();
+    setProfileErrorMsg(null);
+    setProfileSuccessMsg(null);
+    const res = await fetch('/api/auth/verify-email', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: verificationCodeInput.trim() })
+    });
+    const json = await res.json();
+    if (!res.ok) {
+      setProfileErrorMsg(json.error || 'Verification failed.');
+      return;
+    }
+    if (Array.isArray(json.users)) setUserProfiles(json.users);
+    setVerificationCodeInput('');
+    setDevVerificationCodePreview(null);
+    setProfileSuccessMsg(json.message || 'Email verified for password recovery!');
   }
 
   async function handleLogout() {
@@ -466,11 +686,16 @@ export const App: React.FC = () => {
     setProfileErrorMsg(null);
     setProfileSuccessMsg(null);
     const trimmed = newProfileName.trim();
+    const trimmedEmail = newProfileEmail.trim().toLowerCase();
     if (!trimmed) {
-      setProfileErrorMsg('Please enter an account / profile name.');
+      setProfileErrorMsg('Please enter a username.');
       return;
     }
-    if (newProfilePin.trim().length > 0 && newProfilePin.trim().length < 4) {
+    if (!trimmedEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
+      setProfileErrorMsg('A valid email address is required for verification and password recovery.');
+      return;
+    }
+    if (newProfilePin.trim().length < 4) {
       setProfileErrorMsg('Password must be at least 4 characters.');
       return;
     }
@@ -480,6 +705,7 @@ export const App: React.FC = () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name: trimmed,
+          email: trimmedEmail,
           avatar_color: newProfileColor,
           password: newProfilePin.trim()
         })
@@ -491,14 +717,22 @@ export const App: React.FC = () => {
       }
       if (Array.isArray(json.users)) setUserProfiles(json.users);
       setNewProfileName('');
+      setNewProfileEmail('');
       setNewProfilePin('');
+      if (json.devPreviewCode) {
+        setDevVerificationCodePreview(json.devPreviewCode);
+      }
       if (json.user) {
         saveUserSessionToken(json.user.id, json.token);
         setActiveUserId(json.user.id);
         setSelectedDeckId(null);
         setInventoryLocationFilter('ALL');
-        setProfilesModalOpen(false);
         await fetchAllData();
+        setProfileSuccessMsg(
+          json.emailDelivered
+            ? `Account created! Enter the 6-digit code sent to ${trimmedEmail} below to verify your email.`
+            : `Account created! Enter the 6-digit verification code (${json.devPreviewCode}) below to verify ${trimmedEmail}.`
+        );
       }
     } catch {
       setProfileErrorMsg('Could not create account. Please check your connection.');
@@ -563,9 +797,10 @@ export const App: React.FC = () => {
               onClick={() => {
                 setAuthMode('login');
                 setAuthError(null);
+                setAuthSuccessMsg(null);
               }}
               className={`py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer ${
-                authMode === 'login'
+                authMode === 'login' || authMode === 'forgot'
                   ? 'bg-amber-500 text-slate-950 shadow-xs'
                   : 'text-slate-400 hover:text-slate-200'
               }`}
@@ -578,6 +813,7 @@ export const App: React.FC = () => {
               onClick={() => {
                 setAuthMode('register');
                 setAuthError(null);
+                setAuthSuccessMsg(null);
               }}
               className={`py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer ${
                 authMode === 'register'
@@ -596,69 +832,216 @@ export const App: React.FC = () => {
             </div>
           )}
 
-          <form onSubmit={handleAuthSubmit} className="space-y-4">
-            <div>
-              <label className="block text-xs font-bold text-slate-300 mb-1.5">
-                Username
-              </label>
-              <input
-                type="text"
-                autoComplete="username"
-                required
-                placeholder="Enter your username"
-                value={authUsername}
-                onChange={e => setAuthUsername(e.target.value)}
-                className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-sm text-slate-100 focus:outline-none focus:border-amber-500"
-              />
+          {authSuccessMsg && (
+            <div className="p-3 rounded-xl bg-emerald-950/70 border border-emerald-500/40 text-xs text-emerald-200 font-semibold space-y-1">
+              <div>{authSuccessMsg}</div>
+              {devResetCodePreview && (
+                <div className="font-mono text-amber-300">
+                  Verification / Recovery Code: <strong>{devResetCodePreview}</strong>
+                </div>
+              )}
             </div>
+          )}
 
-            <div>
-              <label className="block text-xs font-bold text-slate-300 mb-1.5">
-                Password
-              </label>
-              <input
-                type="password"
-                autoComplete={authMode === 'register' ? 'new-password' : 'current-password'}
-                required
-                placeholder={authMode === 'register' ? 'Create a password (4+ characters)' : 'Enter your password'}
-                value={authPassword}
-                onChange={e => setAuthPassword(e.target.value)}
-                className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-sm text-slate-100 focus:outline-none focus:border-amber-500"
-              />
-            </div>
-
-            {authMode === 'register' && (
+          {authMode === 'forgot' ? (
+            !forgotCodeSent ? (
+              <form onSubmit={handleSendForgotCode} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-bold text-slate-300 mb-1.5">
+                    Recovery Email Address (or Username)
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="you@example.com or username"
+                    value={forgotIdentifier}
+                    onChange={e => setForgotIdentifier(e.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-sm text-slate-100 focus:outline-none focus:border-amber-500"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={authSubmitting}
+                  className="w-full py-3 rounded-xl bg-sky-500 hover:bg-sky-400 disabled:opacity-60 text-slate-950 font-black text-sm shadow-md transition cursor-pointer"
+                >
+                  {authSubmitting ? 'Sending Code...' : 'Send 6-Digit Recovery Code'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuthMode('login');
+                    setAuthError(null);
+                    setAuthSuccessMsg(null);
+                  }}
+                  className="w-full py-2 text-xs text-slate-400 hover:text-slate-200 font-semibold cursor-pointer"
+                >
+                  ← Back to Sign In
+                </button>
+              </form>
+            ) : (
+              <form onSubmit={handleResetPasswordWithCode} className="space-y-4">
+                <div className="text-xs text-slate-400">
+                  Enter the 6-digit recovery code sent to <strong className="text-slate-200">{forgotMaskedEmail}</strong> and choose a new password:
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-300 mb-1.5">
+                    6-Digit Recovery Code
+                  </label>
+                  <input
+                    type="text"
+                    maxLength={6}
+                    required
+                    placeholder="123456"
+                    value={forgotCode}
+                    onChange={e => setForgotCode(e.target.value.replace(/\D/g, ''))}
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-sky-500/60 font-mono tracking-widest text-center text-base text-amber-300 focus:outline-none focus:border-amber-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-300 mb-1.5">
+                    New Password (4+ characters)
+                  </label>
+                  <input
+                    type="password"
+                    required
+                    placeholder="Enter new password"
+                    value={forgotNewPassword}
+                    onChange={e => setForgotNewPassword(e.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-sm text-slate-100 focus:outline-none focus:border-amber-500"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={authSubmitting}
+                  className="w-full py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-60 text-slate-950 font-black text-sm shadow-md transition cursor-pointer"
+                >
+                  {authSubmitting ? 'Resetting Password...' : 'Reset Password & Sign In'}
+                </button>
+                <div className="flex items-center justify-between text-xs pt-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setForgotCodeSent(false);
+                      setAuthError(null);
+                    }}
+                    className="text-sky-400 hover:underline cursor-pointer"
+                  >
+                    Resend Code
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAuthMode('login');
+                      setForgotCodeSent(false);
+                      setAuthError(null);
+                      setAuthSuccessMsg(null);
+                    }}
+                    className="text-slate-400 hover:text-slate-200 cursor-pointer"
+                  >
+                    ← Back to Sign In
+                  </button>
+                </div>
+              </form>
+            )
+          ) : (
+            <form onSubmit={handleAuthSubmit} className="space-y-4">
               <div>
                 <label className="block text-xs font-bold text-slate-300 mb-1.5">
-                  Vault Badge Color
+                  {authMode === 'register' ? 'Username' : 'Username or Email Address'}
                 </label>
-                <select
-                  value={authColor}
-                  onChange={e => setAuthColor(e.target.value)}
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-xs text-slate-100 focus:outline-none focus:border-amber-500"
-                >
-                  <option value="amber">Amber Gold</option>
-                  <option value="emerald">Emerald Green</option>
-                  <option value="sky">Sky Blue</option>
-                  <option value="violet">Violet Purple</option>
-                  <option value="rose">Crimson Rose</option>
-                  <option value="orange">Solar Orange</option>
-                </select>
+                <input
+                  type="text"
+                  autoComplete="username"
+                  required
+                  placeholder={authMode === 'register' ? 'Choose a username' : 'Enter your username or email'}
+                  value={authUsername}
+                  onChange={e => setAuthUsername(e.target.value)}
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-sm text-slate-100 focus:outline-none focus:border-amber-500"
+                />
               </div>
-            )}
 
-            <button
-              type="submit"
-              disabled={authSubmitting}
-              className="w-full py-3 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-slate-950 font-black text-sm shadow-md shadow-amber-500/10 transition cursor-pointer"
-            >
-              {authSubmitting
-                ? 'Unlocking Vault...'
-                : authMode === 'register'
-                  ? 'Create My Personal Vault'
-                  : 'Sign In to My Vault'}
-            </button>
-          </form>
+              {authMode === 'register' && (
+                <div>
+                  <label className="block text-xs font-bold text-slate-300 mb-1.5">
+                    Email Address <span className="text-amber-400">(Required for Password Recovery)</span>
+                  </label>
+                  <input
+                    type="email"
+                    autoComplete="email"
+                    required
+                    placeholder="you@example.com"
+                    value={authEmail}
+                    onChange={e => setAuthEmail(e.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-sm text-slate-100 focus:outline-none focus:border-amber-500"
+                  />
+                </div>
+              )}
+
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="block text-xs font-bold text-slate-300">
+                    Password
+                  </label>
+                  {authMode === 'login' && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAuthMode('forgot');
+                        setForgotIdentifier(authUsername);
+                        setForgotCodeSent(false);
+                        setAuthError(null);
+                        setAuthSuccessMsg(null);
+                      }}
+                      className="text-[11px] font-semibold text-sky-400 hover:text-sky-300 hover:underline cursor-pointer"
+                    >
+                      Forgot Password?
+                    </button>
+                  )}
+                </div>
+                <input
+                  type="password"
+                  autoComplete={authMode === 'register' ? 'new-password' : 'current-password'}
+                  required
+                  placeholder={authMode === 'register' ? 'Create a password (4+ characters)' : 'Enter your password'}
+                  value={authPassword}
+                  onChange={e => setAuthPassword(e.target.value)}
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-sm text-slate-100 focus:outline-none focus:border-amber-500"
+                />
+              </div>
+
+              {authMode === 'register' && (
+                <div>
+                  <label className="block text-xs font-bold text-slate-300 mb-1.5">
+                    Vault Badge Color
+                  </label>
+                  <select
+                    value={authColor}
+                    onChange={e => setAuthColor(e.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-xs text-slate-100 focus:outline-none focus:border-amber-500"
+                  >
+                    <option value="amber">Amber Gold</option>
+                    <option value="emerald">Emerald Green</option>
+                    <option value="sky">Sky Blue</option>
+                    <option value="violet">Violet Purple</option>
+                    <option value="rose">Crimson Rose</option>
+                    <option value="orange">Solar Orange</option>
+                  </select>
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={authSubmitting}
+                className="w-full py-3 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-slate-950 font-black text-sm shadow-md shadow-amber-500/10 transition cursor-pointer"
+              >
+                {authSubmitting
+                  ? 'Unlocking Vault...'
+                  : authMode === 'register'
+                    ? 'Create My Personal Vault'
+                    : 'Sign In to My Vault'}
+              </button>
+            </form>
+          )}
 
           <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800/80 flex items-start gap-2.5 text-[11px] text-slate-400">
             <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
@@ -1289,6 +1672,116 @@ export const App: React.FC = () => {
               </div>
             </div>
 
+            {/* Dedicated Change Username & Recovery Email Form */}
+            <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="text-xs font-bold text-amber-300 flex items-center gap-1.5">
+                  <Edit3 className="w-4 h-4 text-amber-400" />
+                  Change Username &amp; Recovery Email
+                </div>
+                {activeUserProfile.email ? (
+                  activeUserProfile.email_verified ? (
+                    <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-[10px] font-bold flex items-center gap-1">
+                      <CheckCircle2 className="w-3 h-3" />
+                      Email Verified for Recovery
+                    </span>
+                  ) : (
+                    <span className="px-2 py-0.5 rounded-full bg-amber-500/20 border border-amber-500/40 text-amber-300 text-[10px] font-bold flex items-center gap-1">
+                      <Mail className="w-3 h-3" />
+                      Verification Pending
+                    </span>
+                  )
+                ) : (
+                  <span className="px-2 py-0.5 rounded-full bg-rose-500/20 border border-rose-500/40 text-rose-300 text-[10px] font-bold">
+                    No Recovery Email Set
+                  </span>
+                )}
+              </div>
+
+              <form onSubmit={handleSaveUsernameAndEmail} className="space-y-2.5">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">Username</label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="Your username"
+                      value={accountUsernameInput}
+                      onChange={e => setAccountUsernameInput(e.target.value)}
+                      className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-xs text-slate-100 focus:outline-none focus:border-amber-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">
+                      Email Address <span className="text-amber-400">(Required for Password Recovery)</span>
+                    </label>
+                    <input
+                      type="email"
+                      required
+                      placeholder="you@example.com"
+                      value={accountEmailInput}
+                      onChange={e => setAccountEmailInput(e.target.value)}
+                      className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-xs text-slate-100 focus:outline-none focus:border-amber-500"
+                    />
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
+                  <button
+                    type="button"
+                    onClick={handleSendVerificationCode}
+                    className="px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-sky-300 font-semibold text-xs flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Mail className="w-3.5 h-3.5 text-sky-400" />
+                    Send 6-Digit Verification Code
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                    Save Username &amp; Email
+                  </button>
+                </div>
+              </form>
+
+              {/* 6-Digit Email Verification Box */}
+              {(!activeUserProfile.email_verified || devVerificationCodePreview) && (
+                <form
+                  onSubmit={handleVerifyEmailCode}
+                  className="mt-2 p-3 rounded-xl bg-slate-900/90 border border-sky-500/40 space-y-2"
+                >
+                  <div className="text-xs font-bold text-sky-300 flex items-center justify-between">
+                    <span className="flex items-center gap-1.5">
+                      <Mail className="w-3.5 h-3.5 text-sky-400" />
+                      Verify Your Email Address
+                    </span>
+                    {devVerificationCodePreview && (
+                      <span className="font-mono text-[11px] text-amber-300">
+                        Code: <strong>{devVerificationCodePreview}</strong>
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <input
+                      type="text"
+                      maxLength={6}
+                      required
+                      placeholder="Enter 6-digit code"
+                      value={verificationCodeInput}
+                      onChange={e => setVerificationCodeInput(e.target.value.replace(/\D/g, ''))}
+                      className="flex-1 min-w-[140px] px-3 py-1.5 rounded-xl bg-slate-950 border border-slate-700 font-mono tracking-widest text-xs text-amber-300 focus:outline-none focus:border-amber-500"
+                    />
+                    <button
+                      type="submit"
+                      className="px-3.5 py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs cursor-pointer"
+                    >
+                      Verify Code
+                    </button>
+                  </div>
+                </form>
+              )}
+            </div>
+
             {/* Set / Update Password for Current Vault */}
             <form
               onSubmit={handleUpdatePassword}
@@ -1448,11 +1941,12 @@ export const App: React.FC = () => {
                 <UserPlus className="w-4 h-4" />
                 Create Another User Account / Vault
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                 <div>
                   <label className="block text-[11px] text-slate-400 mb-1">Username</label>
                   <input
                     type="text"
+                    required
                     placeholder="Username"
                     value={newProfileName}
                     onChange={e => setNewProfileName(e.target.value)}
@@ -1460,9 +1954,21 @@ export const App: React.FC = () => {
                   />
                 </div>
                 <div>
+                  <label className="block text-[11px] text-slate-400 mb-1">Email Address (Required)</label>
+                  <input
+                    type="email"
+                    required
+                    placeholder="you@example.com"
+                    value={newProfileEmail}
+                    onChange={e => setNewProfileEmail(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-xs text-slate-100 focus:outline-none focus:border-amber-500"
+                  />
+                </div>
+                <div>
                   <label className="block text-[11px] text-slate-400 mb-1">Password</label>
                   <input
                     type="password"
+                    required
                     placeholder="Password (4+ chars)"
                     value={newProfilePin}
                     onChange={e => setNewProfilePin(e.target.value)}

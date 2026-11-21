@@ -134,6 +134,11 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
     email TEXT DEFAULT '',
+    email_verified INTEGER NOT NULL DEFAULT 0,
+    verification_code_hash TEXT DEFAULT '',
+    verification_code_expires_at TEXT DEFAULT '',
+    reset_code_hash TEXT DEFAULT '',
+    reset_code_expires_at TEXT DEFAULT '',
     avatar_color TEXT NOT NULL DEFAULT 'amber',
     pin_code TEXT DEFAULT '',
     password_hash TEXT DEFAULT '',
@@ -196,6 +201,31 @@ try {
 }
 try {
   db.exec(`ALTER TABLE users ADD COLUMN password_salt TEXT DEFAULT '';`);
+} catch {
+  // Column already exists
+}
+try {
+  db.exec(`ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0;`);
+} catch {
+  // Column already exists
+}
+try {
+  db.exec(`ALTER TABLE users ADD COLUMN verification_code_hash TEXT DEFAULT '';`);
+} catch {
+  // Column already exists
+}
+try {
+  db.exec(`ALTER TABLE users ADD COLUMN verification_code_expires_at TEXT DEFAULT '';`);
+} catch {
+  // Column already exists
+}
+try {
+  db.exec(`ALTER TABLE users ADD COLUMN reset_code_hash TEXT DEFAULT '';`);
+} catch {
+  // Column already exists
+}
+try {
+  db.exec(`ALTER TABLE users ADD COLUMN reset_code_expires_at TEXT DEFAULT '';`);
 } catch {
   // Column already exists
 }

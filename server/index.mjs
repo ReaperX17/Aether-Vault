@@ -1481,6 +1481,445 @@ async function handleApi(req, res, url) {
       }
     }
 
+    // 0c. Community, Following, Public Profile Explorer & 1-Click Clone Deck Endpoints (Deployment Alpha 1.2)
+    if (pathname === '/api/community/explore' && method === 'GET') {
+      const q = (url.searchParams.get('q') || '').trim().toLowerCase();
+      const onlyFollowing = url.searchParams.get('onlyFollowing') === 'true';
+      const colorFilter = (url.searchParams.get('color') || '').trim().toUpperCase();
+
+      const followingRows = db
+        .prepare(`SELECT following_id FROM user_follows WHERE follower_id = ?`)
+        .all(userId);
+      const followingSet = new Set(followingRows.map(r => Number(r.following_id)));
+
+      const followerCounts = db
+        .prepare(`SELECT following_id as uid, COUNT(*) as cnt FROM user_follows GROUP BY following_id`)
+        .all();
+      const followingCounts = db
+        .prepare(`SELECT follower_id as uid, COUNT(*) as cnt FROM user_follows GROUP BY follower_id`)
+        .all();
+      const followerMap = new Map(followerCounts.map(r => [Number(r.uid), Number(r.cnt)]));
+      const followingCountMap = new Map(followingCounts.map(r => [Number(r.uid), Number(r.cnt)]));
+
+      // Build public player directory (never exposing email or password hashes)
+      const allUsers = getAllUsersWithStats();
+      const players = allUsers
+        .map(u => ({
+          id: u.id,
+          name: u.name,
+          avatar_color: u.avatar_color,
+          totalCards: u.totalCards,
+          uniqueEntries: u.uniqueEntries,
+          totalDecks: u.totalDecks,
+          followerCount: followerMap.get(u.id) || 0,
+          followingCount: followingCountMap.get(u.id) || 0,
+          isFollowing: followingSet.has(u.id),
+          isSelf: u.id === userId,
+          created_at: u.created_at
+        }))
+        .filter(p => {
+          if (!q) return true;
+          return p.name.toLowerCase().includes(q);
+        });
+
+      const userMap = new Map(allUsers.map(u => [u.id, u]));
+
+      // Viewer's own inventory map (by card name) to show "You own X% of this deck!" on any community deck
+      const viewerInvRows = db
+        .prepare(`SELECT LOWER(name) as lname, SUM(quantity) as qty FROM inventory WHERE COALESCE(user_id, 1) = ? GROUP BY LOWER(name)`)
+        .all(userId);
+      const viewerOwnedByName = new Map();
+      for (const r of viewerInvRows) {
+        viewerOwnedByName.set(r.lname, Number(r.qty || 0));
+        if (r.lname.includes('//')) {
+          const front = r.lname.split('//')[0].trim();
+          viewerOwnedByName.set(front, (viewerOwnedByName.get(front) || 0) + Number(r.qty || 0));
+        }
+      }
+
+      const rawDecks = db
+        .prepare(`SELECT * FROM decks ORDER BY updated_at DESC, id DESC`)
+        .all();
+
+      const communityDecks = [];
+      for (const d of rawDecks) {
+        const authorId = Number(d.user_id || 1);
+        const author = userMap.get(authorId) || { id: authorId, name: `Player #${authorId}`, avatar_color: 'amber' };
+        const isFollowingAuthor = followingSet.has(authorId);
+
+        if (onlyFollowing && !isFollowingAuthor) continue;
+
+        const cards = getDeckCardsEnriched(d.id);
+        const activeCards = cards.filter(c => c.board === 'commander' || c.board === 'mainboard' || c.board === 'sideboard');
+        const commanderCards = cards.filter(c => c.board === 'commander');
+        const commanderNames = commanderCards.map(c => c.name).join(' // ');
+
+        let totalCards = 0;
+        let totalTcg = 0;
+        let totalCkRetail = 0;
+        let viewerOwnedCount = 0;
+        const deckColorSet = new Set(safeParse(d.color_identity, []));
+
+        for (const c of activeCards) {
+          const qty = Number(c.quantity || 1);
+          totalCards += qty;
+          totalTcg += (c.unit_tcg || 0) * qty;
+          totalCkRetail += (c.unit_ck_retail || 0) * qty;
+          if (c.board === 'commander' && Array.isArray(c.color_identity)) {
+            for (const col of c.color_identity) deckColorSet.add(col);
+          }
+          const lowerName = (c.name || '').toLowerCase();
+          const frontName = lowerName.includes('//') ? lowerName.split('//')[0].trim() : lowerName;
+          const ownedInViewer = viewerOwnedByName.get(lowerName) ?? viewerOwnedByName.get(frontName) ?? 0;
+          viewerOwnedCount += Math.min(qty, ownedInViewer);
+        }
+
+        const colorIdentity = Array.from(deckColorSet);
+        const tags = safeParse(d.tags, []);
+
+        if (colorFilter && colorFilter !== 'ALL') {
+          if (colorFilter === 'C') {
+            if (colorIdentity.length > 0) continue;
+          } else if (!colorIdentity.includes(colorFilter)) {
+            continue;
+          }
+        }
+
+        if (q) {
+          const matchName = (d.name || '').toLowerCase().includes(q);
+          const matchAuthor = (author.name || '').toLowerCase().includes(q);
+          const matchCmd = commanderNames.toLowerCase().includes(q);
+          const matchTag = tags.some(t => String(t).toLowerCase().includes(q));
+          const matchFormat = (d.format || '').toLowerCase().includes(q);
+          if (!matchName && !matchAuthor && !matchCmd && !matchTag && !matchFormat) {
+            continue;
+          }
+        }
+
+        const viewerOwnedPct = totalCards > 0 ? Math.round((viewerOwnedCount / totalCards) * 100) : 0;
+
+        communityDecks.push({
+          id: d.id,
+          name: d.name,
+          format: d.format,
+          folder: d.folder || 'Uncategorized',
+          description: d.description || '',
+          cover_image: d.cover_image || commanderCards[0]?.image_art_crop || commanderCards[0]?.image_normal || activeCards[0]?.image_art_crop || null,
+          commander_name: commanderNames || null,
+          color_identity: colorIdentity,
+          tags,
+          cloned_from_deck_id: d.cloned_from_deck_id || null,
+          cloned_from_user_name: d.cloned_from_user_name || '',
+          author_id: authorId,
+          author_name: author.name,
+          author_avatar_color: author.avatar_color || 'amber',
+          is_following_author: isFollowingAuthor,
+          is_own_deck: authorId === userId,
+          total_cards: totalCards,
+          total_tcg: Math.round(totalTcg * 100) / 100,
+          total_ck_retail: Math.round(totalCkRetail * 100) / 100,
+          viewer_owned_cards: viewerOwnedCount,
+          viewer_owned_pct: viewerOwnedPct,
+          updated_at: d.updated_at
+        });
+      }
+
+      return sendJson(res, 200, {
+        decks: communityDecks,
+        players,
+        followingIds: Array.from(followingSet)
+      });
+    }
+
+    const followMatch = pathname.match(/^\/api\/community\/follow\/(\d+)$/);
+    if (followMatch && (method === 'POST' || method === 'DELETE')) {
+      const targetUserId = Number(followMatch[1]);
+      if (targetUserId === userId) {
+        return sendJson(res, 400, { error: 'You cannot follow your own account.' });
+      }
+      const targetExists = db.prepare(`SELECT id FROM users WHERE id = ?`).get(targetUserId);
+      if (!targetExists) {
+        return sendJson(res, 404, { error: 'Player not found.' });
+      }
+
+      if (method === 'POST') {
+        db.prepare(`INSERT OR IGNORE INTO user_follows (follower_id, following_id) VALUES (?, ?)`).run(userId, targetUserId);
+      } else {
+        db.prepare(`DELETE FROM user_follows WHERE follower_id = ? AND following_id = ?`).run(userId, targetUserId);
+      }
+
+      const followerCount =
+        db.prepare(`SELECT COUNT(*) as cnt FROM user_follows WHERE following_id = ?`).get(targetUserId)?.cnt || 0;
+      return sendJson(res, 200, {
+        ok: true,
+        targetUserId,
+        isFollowing: method === 'POST',
+        followerCount: Number(followerCount)
+      });
+    }
+
+    const communityUserMatch = pathname.match(/^\/api\/community\/users\/(\d+)$/);
+    if (communityUserMatch && method === 'GET') {
+      const targetUserId = Number(communityUserMatch[1]);
+      const targetUser = getSingleUserWithStats(targetUserId);
+      if (!targetUser) {
+        return sendJson(res, 404, { error: 'Player not found.' });
+      }
+
+      const isFollowing = Boolean(
+        db.prepare(`SELECT 1 FROM user_follows WHERE follower_id = ? AND following_id = ?`).get(userId, targetUserId)
+      );
+      const followerCount =
+        db.prepare(`SELECT COUNT(*) as cnt FROM user_follows WHERE following_id = ?`).get(targetUserId)?.cnt || 0;
+      const followingCount =
+        db.prepare(`SELECT COUNT(*) as cnt FROM user_follows WHERE follower_id = ?`).get(targetUserId)?.cnt || 0;
+
+      // Read-only enriched inventory of target user
+      const targetInventory = getAllInventoryEnriched(targetUserId);
+      let totalTcg = 0;
+      let totalCkRetail = 0;
+      for (const item of targetInventory) {
+        totalTcg += item.total_tcg || 0;
+        totalCkRetail += item.total_ck_retail || 0;
+      }
+
+      // Viewer's own inventory names for comparison
+      const viewerInvRows = db
+        .prepare(`SELECT LOWER(name) as lname, SUM(quantity) as qty FROM inventory WHERE COALESCE(user_id, 1) = ? GROUP BY LOWER(name)`)
+        .all(userId);
+      const viewerOwnedByName = new Map();
+      for (const r of viewerInvRows) {
+        viewerOwnedByName.set(r.lname, Number(r.qty || 0));
+        if (r.lname.includes('//')) {
+          const front = r.lname.split('//')[0].trim();
+          viewerOwnedByName.set(front, (viewerOwnedByName.get(front) || 0) + Number(r.qty || 0));
+        }
+      }
+
+      // Target user's decks
+      const rawDecks = db
+        .prepare(`SELECT * FROM decks WHERE COALESCE(user_id, 1) = ? ORDER BY updated_at DESC, id DESC`)
+        .all(targetUserId);
+      const targetDecks = rawDecks.map(d => {
+        const cards = getDeckCardsEnriched(d.id);
+        const activeCards = cards.filter(c => c.board === 'commander' || c.board === 'mainboard' || c.board === 'sideboard');
+        const commanderCards = cards.filter(c => c.board === 'commander');
+        let totalCards = 0;
+        let deckTcg = 0;
+        let deckCk = 0;
+        let viewerOwnedCount = 0;
+        const deckColorSet = new Set(safeParse(d.color_identity, []));
+
+        for (const c of activeCards) {
+          const qty = Number(c.quantity || 1);
+          totalCards += qty;
+          deckTcg += (c.unit_tcg || 0) * qty;
+          deckCk += (c.unit_ck_retail || 0) * qty;
+          if (c.board === 'commander' && Array.isArray(c.color_identity)) {
+            for (const col of c.color_identity) deckColorSet.add(col);
+          }
+          const lowerName = (c.name || '').toLowerCase();
+          const frontName = lowerName.includes('//') ? lowerName.split('//')[0].trim() : lowerName;
+          const ownedInViewer = viewerOwnedByName.get(lowerName) ?? viewerOwnedByName.get(frontName) ?? 0;
+          viewerOwnedCount += Math.min(qty, ownedInViewer);
+        }
+
+        return {
+          id: d.id,
+          name: d.name,
+          format: d.format,
+          folder: d.folder || 'Uncategorized',
+          description: d.description || '',
+          cover_image: d.cover_image || commanderCards[0]?.image_art_crop || commanderCards[0]?.image_normal || activeCards[0]?.image_art_crop || null,
+          commander_name: commanderCards.map(c => c.name).join(' // ') || null,
+          color_identity: Array.from(deckColorSet),
+          tags: safeParse(d.tags, []),
+          cloned_from_deck_id: d.cloned_from_deck_id || null,
+          cloned_from_user_name: d.cloned_from_user_name || '',
+          author_id: targetUserId,
+          author_name: targetUser.name,
+          author_avatar_color: targetUser.avatar_color,
+          is_following_author: isFollowing,
+          is_own_deck: targetUserId === userId,
+          total_cards: totalCards,
+          total_tcg: Math.round(deckTcg * 100) / 100,
+          total_ck_retail: Math.round(deckCk * 100) / 100,
+          viewer_owned_cards: viewerOwnedCount,
+          viewer_owned_pct: totalCards > 0 ? Math.round((viewerOwnedCount / totalCards) * 100) : 0,
+          updated_at: d.updated_at
+        };
+      });
+
+      return sendJson(res, 200, {
+        profile: {
+          id: targetUser.id,
+          name: targetUser.name,
+          avatar_color: targetUser.avatar_color,
+          totalCards: targetUser.totalCards,
+          uniqueEntries: targetUser.uniqueEntries,
+          totalDecks: targetUser.totalDecks,
+          totalTcg: Math.round(totalTcg * 100) / 100,
+          totalCkRetail: Math.round(totalCkRetail * 100) / 100,
+          followerCount: Number(followerCount),
+          followingCount: Number(followingCount),
+          isFollowing,
+          isSelf: targetUser.id === userId,
+          created_at: targetUser.created_at
+        },
+        decks: targetDecks,
+        inventory: targetInventory
+      });
+    }
+
+    const communityDeckMatch = pathname.match(/^\/api\/community\/decks\/(\d+)$/);
+    if (communityDeckMatch && method === 'GET') {
+      const targetDeckId = Number(communityDeckMatch[1]);
+      const deckRow = db.prepare(`SELECT * FROM decks WHERE id = ?`).get(targetDeckId);
+      if (!deckRow) {
+        return sendJson(res, 404, { error: 'Deck not found.' });
+      }
+      const authorId = Number(deckRow.user_id || 1);
+      const author = getSingleUserWithStats(authorId) || { id: authorId, name: `Player #${authorId}`, avatar_color: 'amber' };
+      const isFollowingAuthor = Boolean(
+        db.prepare(`SELECT 1 FROM user_follows WHERE follower_id = ? AND following_id = ?`).get(userId, authorId)
+      );
+
+      const cards = getDeckCardsEnriched(targetDeckId);
+      // Compare against the VIEWER'S own inventory so the viewer can see which cards of this deck they already own!
+      const viewerInvRows = db
+        .prepare(`SELECT scryfall_id, name, quantity, finish, location, notes FROM inventory WHERE COALESCE(user_id, 1) = ?`)
+        .all(userId);
+      const viewerUsages = getAllActiveDeckUsages(userId);
+      const deckObj = {
+        ...deckRow,
+        color_identity: safeParse(deckRow.color_identity, []),
+        tags: safeParse(deckRow.tags, [])
+      };
+      const analysis = analyzeAndValidateDeck(deckObj, cards, viewerInvRows, viewerUsages);
+
+      return sendJson(res, 200, {
+        deck: {
+          ...deckObj,
+          author_id: authorId,
+          author_name: author.name,
+          author_avatar_color: author.avatar_color || 'amber',
+          is_following_author: isFollowingAuthor,
+          is_own_deck: authorId === userId,
+          color_identity:
+            analysis.stats.commanderColorIdentity.length > 0
+              ? analysis.stats.commanderColorIdentity
+              : deckObj.color_identity
+        },
+        cards,
+        analysis
+      });
+    }
+
+    const cloneDeckMatch = pathname.match(/^\/api\/community\/decks\/(\d+)\/clone$/);
+    if (cloneDeckMatch && method === 'POST') {
+      const sourceDeckId = Number(cloneDeckMatch[1]);
+      const sourceDeck = db.prepare(`SELECT * FROM decks WHERE id = ?`).get(sourceDeckId);
+      if (!sourceDeck) {
+        return sendJson(res, 404, { error: 'Source deck not found.' });
+      }
+
+      const body = await readJsonBody(req);
+      const authorId = Number(sourceDeck.user_id || 1);
+      const author = getSingleUserWithStats(authorId) || { name: `Player #${authorId}` };
+      const customName = String(body.name || '').trim();
+      const newDeckName = customName || `${sourceDeck.name} (${author.name} Copy)`;
+      const targetFolder = String(body.folder || 'Community Copies').trim() || 'Community Copies';
+      const newDesc = sourceDeck.description
+        ? `${sourceDeck.description}\n(Copied from ${author.name}'s deck "${sourceDeck.name}")`
+        : `Copied from ${author.name}'s deck "${sourceDeck.name}"`;
+
+      // Prefer printings the logged-in user already owns in their own inventory
+      const viewerInv = getAllInventoryEnriched(userId);
+      const invByName = new Map();
+      for (const inv of viewerInv) {
+        const lower = (inv.name || '').toLowerCase();
+        if (!invByName.has(lower)) invByName.set(lower, inv);
+        if (lower.includes('//')) {
+          const front = lower.split('//')[0].trim();
+          if (!invByName.has(front)) invByName.set(front, inv);
+        }
+      }
+
+      const sourceCards = db
+        .prepare(`SELECT scryfall_id, name, quantity, board, finish, custom_category FROM deck_cards WHERE deck_id = ? ORDER BY id ASC`)
+        .all(sourceDeckId);
+
+      let newDeckId = null;
+      db.exec('BEGIN TRANSACTION');
+      try {
+        if (targetFolder !== 'Uncategorized') {
+          db.prepare(`INSERT OR IGNORE INTO deck_folders (user_id, name) VALUES (?, ?)`).run(userId, targetFolder);
+        }
+
+        const resDeck = db
+          .prepare(
+            `INSERT INTO decks (
+               user_id, name, format, folder, description,
+               commander_scryfall_id, partner_scryfall_id, cover_image,
+               color_identity, tags, cloned_from_deck_id, cloned_from_user_name
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          )
+          .run(
+            userId,
+            newDeckName,
+            sourceDeck.format || 'commander',
+            targetFolder,
+            newDesc,
+            sourceDeck.commander_scryfall_id || null,
+            sourceDeck.partner_scryfall_id || null,
+            sourceDeck.cover_image || null,
+            sourceDeck.color_identity || '[]',
+            sourceDeck.tags || '[]',
+            sourceDeckId,
+            author.name
+          );
+        newDeckId = Number(resDeck.lastInsertRowid);
+
+        const insCard = db.prepare(
+          `INSERT OR REPLACE INTO deck_cards (deck_id, scryfall_id, name, quantity, board, finish, custom_category, force_buy)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 0)`
+        );
+
+        for (const c of sourceCards) {
+          const lower = (c.name || '').toLowerCase();
+          const front = lower.includes('//') ? lower.split('//')[0].trim() : lower;
+          const ownedMatch = invByName.get(lower) || invByName.get(front) || null;
+          const chosenScryfallId =
+            ownedMatch && ownedMatch.scryfall_id && !String(ownedMatch.scryfall_id).startsWith('csv-')
+              ? ownedMatch.scryfall_id
+              : c.scryfall_id;
+          const chosenFinish = ownedMatch ? ownedMatch.finish || c.finish : c.finish || 'nonfoil';
+
+          insCard.run(
+            newDeckId,
+            chosenScryfallId,
+            c.name,
+            c.quantity || 1,
+            c.board || 'mainboard',
+            chosenFinish,
+            c.custom_category || ''
+          );
+        }
+
+        db.exec('COMMIT');
+      } catch (err) {
+        db.exec('ROLLBACK');
+        throw err;
+      }
+
+      return sendJson(res, 201, {
+        ok: true,
+        deckId: newDeckId,
+        deckName: newDeckName,
+        message: `Copied "${sourceDeck.name}" by ${author.name} into your personal Decks!`
+      });
+    }
+
     // 1. GET /api/dashboard
     if (pathname === '/api/dashboard' && method === 'GET') {
       const items = getAllInventoryEnriched(userId);

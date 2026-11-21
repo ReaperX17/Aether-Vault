@@ -217,3 +217,45 @@ export interface NetworkInfo {
   primaryLanUrl: string;
 }
 
+export interface CommunityDeckSummary {
+  id: number;
+  name: string;
+  format: string;
+  folder: string;
+  description: string;
+  cover_image: string | null;
+  commander_name: string | null;
+  color_identity: string[];
+  tags: string[];
+  cloned_from_deck_id?: number | null;
+  cloned_from_user_name?: string;
+  author_id: number;
+  author_name: string;
+  author_avatar_color: string;
+  is_following_author: boolean;
+  is_own_deck: boolean;
+  total_cards: number;
+  total_tcg: number;
+  total_ck_retail: number;
+  viewer_owned_cards: number;
+  viewer_owned_pct: number;
+  updated_at: string;
+}
+
+export interface CommunityPlayerProfile {
+  id: number;
+  name: string;
+  avatar_color: string;
+  totalCards: number;
+  uniqueEntries: number;
+  totalDecks: number;
+  totalTcg?: number;
+  totalCkRetail?: number;
+  followerCount: number;
+  followingCount: number;
+  isFollowing: boolean;
+  isSelf: boolean;
+  created_at?: string;
+}
+
+

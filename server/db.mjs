@@ -156,6 +156,18 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id);
 
+  CREATE TABLE IF NOT EXISTS user_follows (
+    follower_id INTEGER NOT NULL,
+    following_id INTEGER NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (follower_id, following_id),
+    FOREIGN KEY (follower_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (following_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_user_follows_follower ON user_follows(follower_id);
+  CREATE INDEX IF NOT EXISTS idx_user_follows_following ON user_follows(following_id);
+
   CREATE TABLE IF NOT EXISTS sync_meta (
     key TEXT PRIMARY KEY,
     value TEXT,
@@ -226,6 +238,16 @@ try {
 }
 try {
   db.exec(`ALTER TABLE users ADD COLUMN reset_code_expires_at TEXT DEFAULT '';`);
+} catch {
+  // Column already exists
+}
+try {
+  db.exec(`ALTER TABLE decks ADD COLUMN cloned_from_deck_id INTEGER DEFAULT NULL;`);
+} catch {
+  // Column already exists
+}
+try {
+  db.exec(`ALTER TABLE decks ADD COLUMN cloned_from_user_name TEXT DEFAULT '';`);
 } catch {
   // Column already exists
 }

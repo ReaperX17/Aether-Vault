@@ -24,12 +24,14 @@ import {
   KeyRound,
   UserPlus,
   Download,
-  Mail
+  Mail,
+  Globe
 } from 'lucide-react';
 import { BoardType, DashboardData, DeckSummary, InventoryItem, NetworkInfo, UserProfile } from './types';
 import { DashboardView } from './components/DashboardView';
 import { InventoryView } from './components/InventoryView';
 import { DecksView } from './components/DecksView';
+import { CommunityView } from './components/CommunityView';
 import { CardSearchModal } from './components/CardSearchModal';
 import { ImportExportModal } from './components/ImportExportModal';
 import { formatUsd } from './components/PriceBadge';
@@ -53,9 +55,11 @@ export const App: React.FC = () => {
   ]);
   const [networkInfo, setNetworkInfo] = useState<NetworkInfo | null>(null);
 
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'inventory' | 'decks'>(() => {
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'inventory' | 'decks' | 'community'>(() => {
     const saved = localStorage.getItem('aethervault_active_tab');
-    return (saved === 'inventory' || saved === 'decks' || saved === 'dashboard') ? saved : 'dashboard';
+    return (saved === 'inventory' || saved === 'decks' || saved === 'community' || saved === 'dashboard')
+      ? saved
+      : 'dashboard';
   });
   const [dashboardData, setDashboardData] = useState<DashboardData | null>(null);
   const [inventoryItems, setInventoryItems] = useState<InventoryItem[]>([]);
@@ -1129,6 +1133,18 @@ export const App: React.FC = () => {
                 {decks.length}
               </span>
             </button>
+
+            <button
+              onClick={() => setActiveTab('community')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${
+                activeTab === 'community'
+                  ? 'bg-amber-500 text-slate-950 shadow-xs'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Globe className="w-3.5 h-3.5" />
+              <span>Community</span>
+            </button>
           </nav>
 
           {/* Right Quick Actions & Live Ticker */}
@@ -1309,6 +1325,17 @@ export const App: React.FC = () => {
             onRefreshGlobal={fetchAllData}
           />
         )}
+
+        {activeTab === 'community' && (
+          <CommunityView
+            currentUserId={activeUserId}
+            onDeckCloned={async newDeckId => {
+              await fetchAllData();
+              setSelectedDeckId(newDeckId);
+              setActiveTab('decks');
+            }}
+          />
+        )}
       </main>
 
       {/* Official Wizards of the Coast Fan Content Policy & Attribution Footer */}
@@ -1353,18 +1380,18 @@ export const App: React.FC = () => {
       </footer>
 
       {/* Mobile Bottom Navigation Bar */}
-      <nav className="md:hidden fixed bottom-0 inset-x-0 z-40 bg-slate-950/95 backdrop-blur-lg border-t border-slate-800 px-2 py-1.5 grid grid-cols-4 gap-1">
+      <nav className="md:hidden fixed bottom-0 inset-x-0 z-40 bg-slate-950/95 backdrop-blur-lg border-t border-slate-800 px-2 py-1.5 grid grid-cols-5 gap-1">
         <button
           type="button"
           onClick={() => setActiveTab('dashboard')}
-          className={`py-1.5 px-2 rounded-xl flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold transition cursor-pointer ${
+          className={`py-1.5 px-1.5 rounded-xl flex flex-col items-center justify-center gap-0.5 text-[10px] font-bold transition cursor-pointer ${
             activeTab === 'dashboard'
               ? 'bg-amber-500 text-slate-950'
               : 'text-slate-400 hover:text-slate-200'
           }`}
         >
           <LayoutDashboard className="w-4 h-4" />
-          <span>Dashboard</span>
+          <span>Home</span>
         </button>
 
         <button
@@ -1373,37 +1400,40 @@ export const App: React.FC = () => {
             setInventoryLocationFilter('ALL');
             setActiveTab('inventory');
           }}
-          className={`py-1.5 px-2 rounded-xl flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold transition cursor-pointer ${
+          className={`py-1.5 px-1.5 rounded-xl flex flex-col items-center justify-center gap-0.5 text-[10px] font-bold transition cursor-pointer ${
             activeTab === 'inventory'
               ? 'bg-amber-500 text-slate-950'
               : 'text-slate-400 hover:text-slate-200'
           }`}
         >
-          <div className="flex items-center gap-1">
-            <FolderOpen className="w-4 h-4" />
-            {dashboardData && (
-              <span className="font-mono text-[10px]">
-                ({dashboardData.summary.totalCards})
-              </span>
-            )}
-          </div>
+          <FolderOpen className="w-4 h-4" />
           <span>Collection</span>
         </button>
 
         <button
           type="button"
           onClick={() => setActiveTab('decks')}
-          className={`py-1.5 px-2 rounded-xl flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold transition cursor-pointer ${
+          className={`py-1.5 px-1.5 rounded-xl flex flex-col items-center justify-center gap-0.5 text-[10px] font-bold transition cursor-pointer ${
             activeTab === 'decks'
               ? 'bg-amber-500 text-slate-950'
               : 'text-slate-400 hover:text-slate-200'
           }`}
         >
-          <div className="flex items-center gap-1">
-            <Layers className="w-4 h-4" />
-            <span className="font-mono text-[10px]">({decks.length})</span>
-          </div>
+          <Layers className="w-4 h-4" />
           <span>Decks</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab('community')}
+          className={`py-1.5 px-1.5 rounded-xl flex flex-col items-center justify-center gap-0.5 text-[10px] font-bold transition cursor-pointer ${
+            activeTab === 'community'
+              ? 'bg-amber-500 text-slate-950'
+              : 'text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <Globe className="w-4 h-4" />
+          <span>Community</span>
         </button>
 
         <button

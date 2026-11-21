@@ -1134,15 +1134,22 @@ async function handleApi(req, res, url) {
       return sendJson(res, 200, { ok: true, folder: rootDir });
     }
 
-    // All remaining routes require an authenticated user session
-    if (!auth.authenticated || !auth.userId) {
+    const isGuestReadOnlyRoute =
+      method === 'GET' &&
+      (pathname === '/api/community/explore' ||
+        /^\/api\/community\/(users|decks)\/\d+$/.test(pathname) ||
+        pathname === '/api/scryfall/search' ||
+        pathname === '/api/scryfall/printings');
+
+    // All personal vault & mutating routes require an authenticated user session
+    if (!isGuestReadOnlyRoute && (!auth.authenticated || !auth.userId)) {
       return sendJson(res, 401, {
         error: 'Authentication required. Please sign in to access your personal AetherVault.',
         requireAuth: true
       });
     }
 
-    const userId = auth.userId;
+    const userId = auth.authenticated && auth.userId ? auth.userId : 0;
 
     // 0b-0. Personal Vault Full JSON Backup & Restore (GET /api/vault/backup & POST /api/vault/restore)
     if (pathname === '/api/vault/backup' && method === 'GET') {

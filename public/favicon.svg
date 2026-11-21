@@ -1,0 +1,118 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <defs>
+    <linearGradient id="av-bg" x1="12" y1="8" x2="116" y2="120" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0f172a" />
+      <stop offset="50%" stop-color="#020617" />
+      <stop offset="100%" stop-color="#1e1b4b" />
+    </linearGradient>
+    <linearGradient id="av-gold" x1="16" y1="12" x2="112" y2="116" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#fde68a" />
+      <stop offset="45%" stop-color="#f59e0b" />
+      <stop offset="100%" stop-color="#b45309" />
+    </linearGradient>
+    <linearGradient id="av-aether" x1="36" y1="24" x2="92" y2="96" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#6366f1" />
+    </linearGradient>
+    <linearGradient id="av-card-left" x1="26" y1="30" x2="64" y2="88" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#1e293b" />
+      <stop offset="100%" stop-color="#0f172a" />
+    </linearGradient>
+  </defs>
+
+  <!-- Outer Arcane Vault Shield / Hexagon -->
+  <path
+    d="M64 6L114 28V70C114 98 92 115 64 122C36 115 14 98 14 70V28L64 6Z"
+    fill="url(#av-bg)"
+    stroke="url(#av-gold)"
+    stroke-width="6"
+    stroke-linejoin="round"
+  />
+
+  <!-- Inner Vault Engraving Ring -->
+  <path
+    d="M64 14L106 33V69C106 92 87 107 64 113C41 107 22 92 22 69V33L64 14Z"
+    stroke="#38bdf8"
+    stroke-opacity="0.35"
+    stroke-width="2"
+    stroke-linejoin="round"
+  />
+
+  <!-- Left Fanned MTG Card -->
+  <g transform="rotate(-14 50 60)">
+    <rect
+      x="32"
+      y="30"
+      width="36"
+      height="50"
+      rx="5"
+      fill="url(#av-card-left)"
+      stroke="#38bdf8"
+      stroke-width="2.5"
+    />
+    <rect x="37" y="36" width="26" height="18" rx="2" fill="#38bdf8" fill-opacity="0.25" />
+  </g>
+
+  <!-- Right Fanned MTG Card -->
+  <g transform="rotate(14 78 60)">
+    <rect
+      x="60"
+      y="30"
+      width="36"
+      height="50"
+      rx="5"
+      fill="url(#av-card-left)"
+      stroke="#a855f7"
+      stroke-width="2.5"
+    />
+    <rect x="65" y="36" width="26" height="18" rx="2" fill="#a855f7" fill-opacity="0.25" />
+  </g>
+
+  <!-- Center Hero Commander Card in Gold Vault Frame -->
+  <rect
+    x="44"
+    y="24"
+    width="40"
+    height="56"
+    rx="6"
+    fill="#090d16"
+    stroke="url(#av-gold)"
+    stroke-width="3.5"
+  />
+  <!-- Inner Card Art Window -->
+  <rect
+    x="49"
+    y="30"
+    width="30"
+    height="23"
+    rx="3"
+    fill="url(#av-aether)"
+    fill-opacity="0.28"
+    stroke="#fbbf24"
+    stroke-opacity="0.5"
+    stroke-width="1.5"
+  />
+
+  <!-- Arcane Aether Compass / Vault Star Emblem -->
+  <path
+    d="M64 33L67.5 41.5L76 45L67.5 48.5L64 57L60.5 48.5L52 45L60.5 41.5L64 33Z"
+    fill="#fde68a"
+  />
+  <circle cx="64" cy="45" r="3" fill="#38bdf8" />
+
+  <!-- Card Text Bars / Vault Lock Lines -->
+  <line x1="51" y1="61" x2="77" y2="61" stroke="#fbbf24" stroke-width="2.5" stroke-linecap="round" />
+  <line x1="55" y1="68" x2="73" y2="68" stroke="#94a3b8" stroke-width="2.2" stroke-linecap="round" />
+
+  <!-- WUBRG 5 Mana Gems Along the Lower Vault Arch -->
+  <!-- White (W) -->
+  <circle cx="40" cy="96" r="4.5" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5" />
+  <!-- Blue (U) -->
+  <circle cx="52" cy="101" r="4.5" fill="#38bdf8" stroke="#0284c7" stroke-width="1.5" />
+  <!-- Black (B) -->
+  <circle cx="64" cy="103" r="4.5" fill="#a855f7" stroke="#e2e8f0" stroke-width="1.5" />
+  <!-- Red (R) -->
+  <circle cx="76" cy="101" r="4.5" fill="#f43f5e" stroke="#f59e0b" stroke-width="1.5" />
+  <!-- Green (G) -->
+  <circle cx="88" cy="96" r="4.5" fill="#10b981" stroke="#a7f3d0" stroke-width="1.5" />
+</svg>

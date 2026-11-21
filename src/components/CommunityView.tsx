@@ -28,6 +28,8 @@ import { evaluateDeckBracketAndSalt } from '../deckBracketAndSalt';
 
 interface CommunityViewProps {
   currentUserId: number;
+  isAuthenticated?: boolean;
+  onRequireAuth?: (mode: 'login' | 'register') => void;
   onDeckCloned: (newDeckId: number) => void;
 }
 
@@ -71,7 +73,12 @@ const SECTION_ORDER = [
   'Considering'
 ];
 
-export const CommunityView: React.FC<CommunityViewProps> = ({ currentUserId, onDeckCloned }) => {
+export const CommunityView: React.FC<CommunityViewProps> = ({
+  currentUserId,
+  isAuthenticated = true,
+  onRequireAuth,
+  onDeckCloned
+}) => {
   const [subTab, setSubTab] = useState<'all_decks' | 'following' | 'players'>('all_decks');
   const [searchQuery, setSearchQuery] = useState('');
   const [colorFilter, setColorFilter] = useState<string>('ALL');
@@ -168,6 +175,10 @@ export const CommunityView: React.FC<CommunityViewProps> = ({ currentUserId, onD
   }
 
   async function handleToggleFollow(targetUserId: number, currentlyFollowing: boolean) {
+    if (!isAuthenticated) {
+      onRequireAuth?.('register');
+      return;
+    }
     if (targetUserId === currentUserId) return;
     const method = currentlyFollowing ? 'DELETE' : 'POST';
     const res = await fetch(`/api/community/follow/${targetUserId}`, { method });
@@ -212,6 +223,10 @@ export const CommunityView: React.FC<CommunityViewProps> = ({ currentUserId, onD
   }
 
   async function handleCloneDeck(deckId: number, deckName: string, authorName: string) {
+    if (!isAuthenticated) {
+      onRequireAuth?.('register');
+      return;
+    }
     const customName = window.prompt(
       `Copy "${deckName}" (by ${authorName}) into your own personal Decks so you can modify it freely.\n\nChoose a name for your copy:`,
       `${deckName} (${authorName} Copy)`

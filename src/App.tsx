@@ -32,6 +32,8 @@ import { DashboardView } from './components/DashboardView';
 import { InventoryView } from './components/InventoryView';
 import { DecksView } from './components/DecksView';
 import { CommunityView } from './components/CommunityView';
+import { WhyAetherVaultView } from './components/WhyAetherVaultView';
+import { AetherVaultLogo } from './components/AetherVaultLogo';
 import { CardSearchModal } from './components/CardSearchModal';
 import { ImportExportModal } from './components/ImportExportModal';
 import { formatUsd } from './components/PriceBadge';
@@ -55,11 +57,17 @@ export const App: React.FC = () => {
   ]);
   const [networkInfo, setNetworkInfo] = useState<NetworkInfo | null>(null);
 
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'inventory' | 'decks' | 'community'>(() => {
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'inventory' | 'decks' | 'community' | 'about'>(() => {
     const saved = localStorage.getItem('aethervault_active_tab');
-    return (saved === 'inventory' || saved === 'decks' || saved === 'community' || saved === 'dashboard')
+    return (
+      saved === 'inventory' ||
+      saved === 'decks' ||
+      saved === 'community' ||
+      saved === 'dashboard' ||
+      saved === 'about'
+    )
       ? saved
-      : 'dashboard';
+      : 'about';
   });
   const [dashboardData, setDashboardData] = useState<DashboardData | null>(null);
   const [inventoryItems, setInventoryItems] = useState<InventoryItem[]>([]);
@@ -116,6 +124,7 @@ export const App: React.FC = () => {
   const [authChecking, setAuthChecking] = useState(true);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isPublicServer, setIsPublicServer] = useState(false);
+  const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authMode, setAuthMode] = useState<'login' | 'register' | 'forgot'>('login');
   const [authUsername, setAuthUsername] = useState('');
   const [authEmail, setAuthEmail] = useState('');
@@ -124,6 +133,13 @@ export const App: React.FC = () => {
   const [authError, setAuthError] = useState<string | null>(null);
   const [authSuccessMsg, setAuthSuccessMsg] = useState<string | null>(null);
   const [authSubmitting, setAuthSubmitting] = useState(false);
+
+  function openAuthModal(mode: 'login' | 'register' = 'login') {
+    setAuthMode(mode);
+    setAuthError(null);
+    setAuthSuccessMsg(null);
+    setAuthModalOpen(true);
+  }
 
   // Password Recovery (Forgot Password) state
   const [forgotIdentifier, setForgotIdentifier] = useState('');
@@ -196,6 +212,7 @@ export const App: React.FC = () => {
           setIsAuthenticated(false);
           setAuthChecking(false);
           setServerOffline(false);
+          setActiveTab(prev => (prev === 'community' || prev === 'about' ? prev : 'about'));
           return;
         }
         setIsAuthenticated(true);
@@ -404,8 +421,10 @@ export const App: React.FC = () => {
       }
       setAuthPassword('');
       setIsAuthenticated(true);
+      setAuthModalOpen(false);
       setSelectedDeckId(null);
       setInventoryLocationFilter('ALL');
+      setActiveTab(prev => (prev === 'about' ? 'dashboard' : prev));
       await fetchAllData();
 
       if (authMode === 'register' && json.verificationSent) {
@@ -495,6 +514,8 @@ export const App: React.FC = () => {
       setForgotNewPassword('');
       setForgotCodeSent(false);
       setIsAuthenticated(true);
+      setAuthModalOpen(false);
+      setActiveTab(prev => (prev === 'about' ? 'dashboard' : prev));
       await fetchAllData();
     } catch {
       setAuthError('Unable to reach AetherVault server.');
@@ -604,6 +625,7 @@ export const App: React.FC = () => {
     setInventoryItems([]);
     setDecks([]);
     setSelectedDeckId(null);
+    setActiveTab('about');
   }
 
   async function handleUpdatePassword(e: React.FormEvent) {
@@ -648,7 +670,7 @@ export const App: React.FC = () => {
       setAuthUsername(profile.name);
       setAuthPassword('');
       setAuthError(null);
-      setIsAuthenticated(false);
+      setAuthModalOpen(true);
       return;
     }
 
@@ -756,305 +778,15 @@ export const App: React.FC = () => {
     }
   }
 
-  // Show Personal Vault Sign-In / Registration Portal when unauthenticated
-  if (!authChecking && !isAuthenticated && !serverOffline) {
-    return (
-      <div className="min-h-screen flex flex-col items-center justify-center bg-slate-950 text-slate-100 p-4">
-        <div className="w-full max-w-md bg-slate-900/95 border border-slate-800 rounded-2xl p-6 sm:p-8 shadow-2xl space-y-6">
-          <div className="flex flex-col items-center text-center space-y-2">
-            <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-amber-400 to-amber-600 flex items-center justify-center text-slate-950 font-black shadow-lg shadow-amber-500/20">
-              <Sparkles className="w-6 h-6" />
-            </div>
-            <h1 className="text-2xl font-black tracking-tight text-slate-100">AetherVault</h1>
-            <p className="text-xs text-slate-400">
-              MTG Collection Manager &amp; Commander Deck Builder
-            </p>
-          </div>
-
-          {/* Mode Toggle Tabs */}
-          <div className="grid grid-cols-2 gap-1.5 p-1 rounded-xl bg-slate-950 border border-slate-800">
-            <button
-              type="button"
-              onClick={() => {
-                setAuthMode('login');
-                setAuthError(null);
-                setAuthSuccessMsg(null);
-              }}
-              className={`py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer ${
-                authMode === 'login' || authMode === 'forgot'
-                  ? 'bg-amber-500 text-slate-950 shadow-xs'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              <KeyRound className="w-3.5 h-3.5" />
-              <span>Sign In</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setAuthMode('register');
-                setAuthError(null);
-                setAuthSuccessMsg(null);
-              }}
-              className={`py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer ${
-                authMode === 'register'
-                  ? 'bg-amber-500 text-slate-950 shadow-xs'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              <UserPlus className="w-3.5 h-3.5" />
-              <span>Create Account</span>
-            </button>
-          </div>
-
-          {authError && (
-            <div className="p-3 rounded-xl bg-rose-950/70 border border-rose-500/40 text-xs text-rose-200 font-semibold">
-              {authError}
-            </div>
-          )}
-
-          {authSuccessMsg && (
-            <div className="p-3 rounded-xl bg-emerald-950/70 border border-emerald-500/40 text-xs text-emerald-200 font-semibold">
-              {authSuccessMsg}
-            </div>
-          )}
-
-          {authMode === 'forgot' ? (
-            !forgotCodeSent ? (
-              <form onSubmit={handleSendForgotCode} className="space-y-4">
-                <div>
-                  <label className="block text-xs font-bold text-slate-300 mb-1.5">
-                    Recovery Email Address (or Username)
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="you@example.com or username"
-                    value={forgotIdentifier}
-                    onChange={e => setForgotIdentifier(e.target.value)}
-                    className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-sm text-slate-100 focus:outline-none focus:border-amber-500"
-                  />
-                </div>
-                <button
-                  type="submit"
-                  disabled={authSubmitting}
-                  className="w-full py-3 rounded-xl bg-sky-500 hover:bg-sky-400 disabled:opacity-60 text-slate-950 font-black text-sm shadow-md transition cursor-pointer"
-                >
-                  {authSubmitting ? 'Sending Code...' : 'Send 6-Digit Recovery Code'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setAuthMode('login');
-                    setAuthError(null);
-                    setAuthSuccessMsg(null);
-                  }}
-                  className="w-full py-2 text-xs text-slate-400 hover:text-slate-200 font-semibold cursor-pointer"
-                >
-                  ← Back to Sign In
-                </button>
-              </form>
-            ) : (
-              <form onSubmit={handleResetPasswordWithCode} className="space-y-4">
-                <div className="text-xs text-slate-400">
-                  Enter the 6-digit recovery code sent to <strong className="text-slate-200">{forgotMaskedEmail}</strong> and choose a new password:
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-slate-300 mb-1.5">
-                    6-Digit Recovery Code
-                  </label>
-                  <input
-                    type="text"
-                    maxLength={6}
-                    required
-                    placeholder="123456"
-                    value={forgotCode}
-                    onChange={e => setForgotCode(e.target.value.replace(/\D/g, ''))}
-                    className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-sky-500/60 font-mono tracking-widest text-center text-base text-amber-300 focus:outline-none focus:border-amber-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-slate-300 mb-1.5">
-                    New Password (4+ characters)
-                  </label>
-                  <input
-                    type="password"
-                    required
-                    placeholder="Enter new password"
-                    value={forgotNewPassword}
-                    onChange={e => setForgotNewPassword(e.target.value)}
-                    className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-sm text-slate-100 focus:outline-none focus:border-amber-500"
-                  />
-                </div>
-                <button
-                  type="submit"
-                  disabled={authSubmitting}
-                  className="w-full py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-60 text-slate-950 font-black text-sm shadow-md transition cursor-pointer"
-                >
-                  {authSubmitting ? 'Resetting Password...' : 'Reset Password & Sign In'}
-                </button>
-                <div className="flex items-center justify-between text-xs pt-1">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setForgotCodeSent(false);
-                      setAuthError(null);
-                    }}
-                    className="text-sky-400 hover:underline cursor-pointer"
-                  >
-                    Resend Code
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setAuthMode('login');
-                      setForgotCodeSent(false);
-                      setAuthError(null);
-                      setAuthSuccessMsg(null);
-                    }}
-                    className="text-slate-400 hover:text-slate-200 cursor-pointer"
-                  >
-                    ← Back to Sign In
-                  </button>
-                </div>
-              </form>
-            )
-          ) : (
-            <form onSubmit={handleAuthSubmit} className="space-y-4">
-              <div>
-                <label className="block text-xs font-bold text-slate-300 mb-1.5">
-                  {authMode === 'register' ? 'Username' : 'Username or Email Address'}
-                </label>
-                <input
-                  type="text"
-                  autoComplete="username"
-                  required
-                  placeholder={authMode === 'register' ? 'Choose a username' : 'Enter your username or email'}
-                  value={authUsername}
-                  onChange={e => setAuthUsername(e.target.value)}
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-sm text-slate-100 focus:outline-none focus:border-amber-500"
-                />
-              </div>
-
-              {authMode === 'register' && (
-                <div>
-                  <label className="block text-xs font-bold text-slate-300 mb-1.5">
-                    Email Address <span className="text-amber-400">(Required for Password Recovery)</span>
-                  </label>
-                  <input
-                    type="email"
-                    autoComplete="email"
-                    required
-                    placeholder="you@example.com"
-                    value={authEmail}
-                    onChange={e => setAuthEmail(e.target.value)}
-                    className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-sm text-slate-100 focus:outline-none focus:border-amber-500"
-                  />
-                </div>
-              )}
-
-              <div>
-                <div className="flex items-center justify-between mb-1.5">
-                  <label className="block text-xs font-bold text-slate-300">
-                    Password
-                  </label>
-                  {authMode === 'login' && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAuthMode('forgot');
-                        setForgotIdentifier(authUsername);
-                        setForgotCodeSent(false);
-                        setAuthError(null);
-                        setAuthSuccessMsg(null);
-                      }}
-                      className="text-[11px] font-semibold text-sky-400 hover:text-sky-300 hover:underline cursor-pointer"
-                    >
-                      Forgot Password?
-                    </button>
-                  )}
-                </div>
-                <input
-                  type="password"
-                  autoComplete={authMode === 'register' ? 'new-password' : 'current-password'}
-                  required
-                  placeholder={authMode === 'register' ? 'Create a password (4+ characters)' : 'Enter your password'}
-                  value={authPassword}
-                  onChange={e => setAuthPassword(e.target.value)}
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-sm text-slate-100 focus:outline-none focus:border-amber-500"
-                />
-              </div>
-
-              {authMode === 'register' && (
-                <div>
-                  <label className="block text-xs font-bold text-slate-300 mb-1.5">
-                    Vault Badge Color
-                  </label>
-                  <select
-                    value={authColor}
-                    onChange={e => setAuthColor(e.target.value)}
-                    className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-xs text-slate-100 focus:outline-none focus:border-amber-500"
-                  >
-                    <option value="amber">Amber Gold</option>
-                    <option value="emerald">Emerald Green</option>
-                    <option value="sky">Sky Blue</option>
-                    <option value="violet">Violet Purple</option>
-                    <option value="rose">Crimson Rose</option>
-                    <option value="orange">Solar Orange</option>
-                  </select>
-                </div>
-              )}
-
-              <button
-                type="submit"
-                disabled={authSubmitting}
-                className="w-full py-3 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-slate-950 font-black text-sm shadow-md shadow-amber-500/10 transition cursor-pointer"
-              >
-                {authSubmitting
-                  ? 'Unlocking Vault...'
-                  : authMode === 'register'
-                    ? 'Create My Personal Vault'
-                    : 'Sign In to My Vault'}
-              </button>
-            </form>
-          )}
-
-          <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800/80 flex items-start gap-2.5 text-[11px] text-slate-400">
-            <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-            <span>
-              <strong className="text-slate-200">Private &amp; Isolated Library:</strong> Your card collection, binders, and Commander decks are strictly isolated to your account so no other user can view, alter, or delete them.
-            </span>
-          </div>
-
-          <div className="pt-2 border-t border-slate-800/80 text-[10px] text-slate-500 text-center leading-relaxed space-y-1">
-            <p>
-              AetherVault is unofficial Fan Content permitted under the{' '}
-              <a
-                href="https://company.wizards.com/en/legal/fancontentpolicy"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-slate-400 hover:text-amber-300 underline"
-              >
-                Wizards of the Coast Fan Content Policy
-              </a>
-              . Not approved/endorsed by Wizards. Portions of the materials used are property of Wizards of the Coast. ©Wizards of the Coast LLC.
-            </p>
-            <p>
-              Card data &amp; images provided by{' '}
-              <a
-                href="https://scryfall.com"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-slate-400 hover:text-sky-300 underline"
-              >
-                Scryfall
-              </a>
-              . Not affiliated with Scryfall, TCGplayer, or Card Kingdom.
-            </p>
-          </div>
-        </div>
-      </div>
-    );
+  function handleSelectProtectedTab(tab: 'dashboard' | 'inventory' | 'decks') {
+    if (!isAuthenticated) {
+      openAuthModal('login');
+      return;
+    }
+    if (tab === 'inventory') {
+      setInventoryLocationFilter('ALL');
+    }
+    setActiveTab(tab);
   }
 
   return (
@@ -1062,76 +794,26 @@ export const App: React.FC = () => {
       {/* Top Navigation Bar */}
       <header className="sticky top-0 z-30 bg-slate-950/90 backdrop-blur-md border-b border-slate-800/80">
         <div className="max-w-7xl mx-auto px-3 sm:px-6 h-14 sm:h-16 flex items-center justify-between gap-2 sm:gap-3">
-          {/* Brand */}
+          {/* Brand Logo */}
           <div
-            onClick={() => setActiveTab('dashboard')}
-            className="flex items-center gap-2.5 cursor-pointer group shrink-0"
+            onClick={() => setActiveTab(isAuthenticated ? 'dashboard' : 'about')}
+            className="cursor-pointer shrink-0"
           >
-            <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-gradient-to-br from-amber-400 to-amber-600 flex items-center justify-center text-slate-950 font-black shadow-md shadow-amber-500/20">
-              <Sparkles className="w-4 h-4 sm:w-5 sm:h-5" />
-            </div>
-            <div>
-              <div className="font-bold text-sm sm:text-base tracking-tight text-slate-100 group-hover:text-amber-300 transition flex items-center gap-2">
-                <span>AetherVault</span>
-              </div>
-            </div>
+            <AetherVaultLogo size="sm" showTagline={true} />
           </div>
 
           {/* Primary Navigation Tabs (Desktop & Tablet) */}
           <nav className="hidden md:flex items-center gap-1 bg-slate-900 p-1 rounded-xl border border-slate-800">
             <button
-              onClick={() => setActiveTab('dashboard')}
+              onClick={() => setActiveTab('about')}
               className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${
-                activeTab === 'dashboard'
+                activeTab === 'about'
                   ? 'bg-amber-500 text-slate-950 shadow-xs'
                   : 'text-slate-400 hover:text-slate-200'
               }`}
             >
-              <LayoutDashboard className="w-3.5 h-3.5" />
-              <span>Dashboard</span>
-            </button>
-
-            <button
-              onClick={() => {
-                setInventoryLocationFilter('ALL');
-                setActiveTab('inventory');
-              }}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${
-                activeTab === 'inventory'
-                  ? 'bg-amber-500 text-slate-950 shadow-xs'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              <FolderOpen className="w-3.5 h-3.5" />
-              <span>Collection</span>
-              {dashboardData && (
-                <span
-                  className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono ${
-                    activeTab === 'inventory' ? 'bg-slate-950/20 text-slate-950' : 'bg-slate-800 text-slate-300'
-                  }`}
-                >
-                  {dashboardData.summary.totalCards}
-                </span>
-              )}
-            </button>
-
-            <button
-              onClick={() => setActiveTab('decks')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${
-                activeTab === 'decks'
-                  ? 'bg-amber-500 text-slate-950 shadow-xs'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              <Layers className="w-3.5 h-3.5" />
-              <span>Decks</span>
-              <span
-                className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono ${
-                  activeTab === 'decks' ? 'bg-slate-950/20 text-slate-950' : 'bg-slate-800 text-slate-300'
-                }`}
-              >
-                {decks.length}
-              </span>
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>Why AetherVault</span>
             </button>
 
             <button
@@ -1145,85 +827,162 @@ export const App: React.FC = () => {
               <Globe className="w-3.5 h-3.5" />
               <span>Community</span>
             </button>
+
+            <button
+              onClick={() => handleSelectProtectedTab('dashboard')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${
+                activeTab === 'dashboard' && isAuthenticated
+                  ? 'bg-amber-500 text-slate-950 shadow-xs'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <LayoutDashboard className="w-3.5 h-3.5" />
+              <span>Dashboard</span>
+            </button>
+
+            <button
+              onClick={() => handleSelectProtectedTab('inventory')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${
+                activeTab === 'inventory' && isAuthenticated
+                  ? 'bg-amber-500 text-slate-950 shadow-xs'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <FolderOpen className="w-3.5 h-3.5" />
+              <span>Collection</span>
+              {isAuthenticated && dashboardData && (
+                <span
+                  className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono ${
+                    activeTab === 'inventory' ? 'bg-slate-950/20 text-slate-950' : 'bg-slate-800 text-slate-300'
+                  }`}
+                >
+                  {dashboardData.summary.totalCards}
+                </span>
+              )}
+            </button>
+
+            <button
+              onClick={() => handleSelectProtectedTab('decks')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${
+                activeTab === 'decks' && isAuthenticated
+                  ? 'bg-amber-500 text-slate-950 shadow-xs'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Layers className="w-3.5 h-3.5" />
+              <span>Decks</span>
+              {isAuthenticated && (
+                <span
+                  className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono ${
+                    activeTab === 'decks' ? 'bg-slate-950/20 text-slate-950' : 'bg-slate-800 text-slate-300'
+                  }`}
+                >
+                  {decks.length}
+                </span>
+              )}
+            </button>
           </nav>
 
           {/* Right Quick Actions & Live Ticker */}
           <div className="flex items-center gap-1.5 sm:gap-2">
-            {/* Active User Profile Switcher Button */}
-            <button
-              onClick={() => {
-                setProfileErrorMsg(null);
-                fetchUsersAndNetwork();
-                setProfilesModalOpen(true);
-              }}
-              className={`px-2 sm:px-2.5 py-1.5 rounded-xl border ${activeColorStyle.bg} ${activeColorStyle.border} ${activeColorStyle.text} hover:brightness-110 font-bold text-xs flex items-center gap-1.5 transition cursor-pointer`}
-              title="Switch User Profile"
-            >
-              <span className={`w-2 h-2 rounded-full shrink-0 ${activeColorStyle.dot}`} />
-              <Users className="w-3.5 h-3.5 shrink-0" />
-              <span className="max-w-[90px] sm:max-w-[130px] truncate">{activeUserProfile.name}</span>
-            </button>
+            {isAuthenticated ? (
+              <>
+                {/* Active User Profile Switcher Button */}
+                <button
+                  onClick={() => {
+                    setProfileErrorMsg(null);
+                    fetchUsersAndNetwork();
+                    setProfilesModalOpen(true);
+                  }}
+                  className={`px-2 sm:px-2.5 py-1.5 rounded-xl border ${activeColorStyle.bg} ${activeColorStyle.border} ${activeColorStyle.text} hover:brightness-110 font-bold text-xs flex items-center gap-1.5 transition cursor-pointer`}
+                  title="Switch User Profile"
+                >
+                  <span className={`w-2 h-2 rounded-full shrink-0 ${activeColorStyle.dot}`} />
+                  <Users className="w-3.5 h-3.5 shrink-0" />
+                  <span className="max-w-[90px] sm:max-w-[130px] truncate">{activeUserProfile.name}</span>
+                </button>
 
-            {/* Wi-Fi / Mobile Access & QR Code Button */}
-            {!isPublicServer && (
-              <button
-                onClick={() => {
-                  setFirewallStatusMsg(null);
-                  fetchUsersAndNetwork();
-                  setWifiModalOpen(true);
-                }}
-                className="px-2 sm:px-2.5 py-1.5 rounded-xl bg-sky-500/15 hover:bg-sky-500/25 border border-sky-500/40 text-sky-300 font-bold text-xs flex items-center gap-1.5 transition cursor-pointer"
-                title="Wi-Fi / Mobile QR Code"
-              >
-                <QrCode className="w-3.5 h-3.5 text-sky-400" />
-                <span className="hidden lg:inline">Wi-Fi / Mobile</span>
-              </button>
-            )}
+                {/* Wi-Fi / Mobile Access & QR Code Button */}
+                {!isPublicServer && (
+                  <button
+                    onClick={() => {
+                      setFirewallStatusMsg(null);
+                      fetchUsersAndNetwork();
+                      setWifiModalOpen(true);
+                    }}
+                    className="px-2 sm:px-2.5 py-1.5 rounded-xl bg-sky-500/15 hover:bg-sky-500/25 border border-sky-500/40 text-sky-300 font-bold text-xs flex items-center gap-1.5 transition cursor-pointer"
+                    title="Wi-Fi / Mobile QR Code"
+                  >
+                    <QrCode className="w-3.5 h-3.5 text-sky-400" />
+                    <span className="hidden lg:inline">Wi-Fi / Mobile</span>
+                  </button>
+                )}
 
-            {dashboardData && (
-              <div className="hidden 2xl:flex items-center gap-3 px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-xs font-mono">
-                <span className="text-sky-400" title="Total Collection TCGplayer Market Value">
-                  TCG: <strong>{formatUsd(dashboardData.summary.totalTcg)}</strong>
-                </span>
-                <span className="text-slate-700">|</span>
-                <span className="text-amber-400" title="Total Collection Card Kingdom Retail Value">
-                  CK: <strong>{formatUsd(dashboardData.summary.totalCkRetail)}</strong>
-                </span>
-              </div>
-            )}
+                {dashboardData && (
+                  <div className="hidden 2xl:flex items-center gap-3 px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-xs font-mono">
+                    <span className="text-sky-400" title="Total Collection TCGplayer Market Value">
+                      TCG: <strong>{formatUsd(dashboardData.summary.totalTcg)}</strong>
+                    </span>
+                    <span className="text-slate-700">|</span>
+                    <span className="text-amber-400" title="Total Collection Card Kingdom Retail Value">
+                      CK: <strong>{formatUsd(dashboardData.summary.totalCkRetail)}</strong>
+                    </span>
+                  </div>
+                )}
 
-            <button
-              onClick={() => {
-                setSearchModalTarget(activeTab === 'decks' && selectedDeckId ? 'deck' : 'inventory');
-                setSearchModalDeckId(selectedDeckId);
-                setSearchModalBoard('mainboard');
-                setSearchModalOpen(true);
-              }}
-              className="px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 shadow-sm transition cursor-pointer"
-            >
-              <Search className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Add Cards</span>
-            </button>
+                <button
+                  onClick={() => {
+                    setSearchModalTarget(activeTab === 'decks' && selectedDeckId ? 'deck' : 'inventory');
+                    setSearchModalDeckId(selectedDeckId);
+                    setSearchModalBoard('mainboard');
+                    setSearchModalOpen(true);
+                  }}
+                  className="px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 shadow-sm transition cursor-pointer"
+                >
+                  <Search className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">Add Cards</span>
+                </button>
 
-            <button
-              onClick={() => setImportModalOpen(true)}
-              className="p-1.5 sm:p-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 transition cursor-pointer"
-              title="Bulk Import CSV / Decklist"
-            >
-              <Upload className="w-4 h-4 text-amber-400" />
-            </button>
+                <button
+                  onClick={() => setImportModalOpen(true)}
+                  className="p-1.5 sm:p-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 transition cursor-pointer"
+                  title="Bulk Import CSV / Decklist"
+                >
+                  <Upload className="w-4 h-4 text-amber-400" />
+                </button>
 
-            {!isPublicServer && (
-              <button
-                onClick={() => {
-                  setStandaloneStatusMsg(null);
-                  setStandaloneModalOpen(true);
-                }}
-                className="hidden sm:flex p-2 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/40 text-emerald-300 font-bold text-xs items-center gap-1.5 transition cursor-pointer"
-                title="Standalone Desktop Launcher"
-              >
-                <Monitor className="w-4 h-4 text-emerald-400" />
-              </button>
+                {!isPublicServer && (
+                  <button
+                    onClick={() => {
+                      setStandaloneStatusMsg(null);
+                      setStandaloneModalOpen(true);
+                    }}
+                    className="hidden sm:flex p-2 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/40 text-emerald-300 font-bold text-xs items-center gap-1.5 transition cursor-pointer"
+                    title="Standalone Desktop Launcher"
+                  >
+                    <Monitor className="w-4 h-4 text-emerald-400" />
+                  </button>
+                )}
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={() => openAuthModal('login')}
+                  className="px-3 py-1.5 sm:py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 font-bold text-xs flex items-center gap-1.5 transition cursor-pointer"
+                >
+                  <KeyRound className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Sign In</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => openAuthModal('register')}
+                  className="px-3 sm:px-3.5 py-1.5 sm:py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs flex items-center gap-1.5 shadow-sm shadow-amber-500/15 transition cursor-pointer"
+                >
+                  <UserPlus className="w-3.5 h-3.5" />
+                  <span>Create Free Vault</span>
+                </button>
+              </>
             )}
           </div>
         </div>
@@ -1255,7 +1014,16 @@ export const App: React.FC = () => {
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 pt-4 pb-24 md:py-6">
-        {activeTab === 'dashboard' && (
+        {(activeTab === 'about' || (!isAuthenticated && activeTab !== 'community')) && (
+          <WhyAetherVaultView
+            isAuthenticated={isAuthenticated}
+            onExploreCommunity={() => setActiveTab('community')}
+            onOpenAuth={mode => openAuthModal(mode)}
+            onEnterVault={() => setActiveTab('dashboard')}
+          />
+        )}
+
+        {isAuthenticated && activeTab === 'dashboard' && (
           <DashboardView
             data={dashboardData}
             decks={decks}
@@ -1284,7 +1052,7 @@ export const App: React.FC = () => {
           />
         )}
 
-        {activeTab === 'inventory' && (
+        {isAuthenticated && activeTab === 'inventory' && (
           <InventoryView
             items={inventoryItems}
             decks={decks}
@@ -1310,7 +1078,7 @@ export const App: React.FC = () => {
           />
         )}
 
-        {activeTab === 'decks' && (
+        {isAuthenticated && activeTab === 'decks' && (
           <DecksView
             decks={decks}
             folders={deckFolders}
@@ -1328,7 +1096,9 @@ export const App: React.FC = () => {
 
         {activeTab === 'community' && (
           <CommunityView
-            currentUserId={activeUserId}
+            currentUserId={isAuthenticated ? activeUserId : 0}
+            isAuthenticated={isAuthenticated}
+            onRequireAuth={mode => openAuthModal(mode)}
             onDeckCloned={async newDeckId => {
               await fetchAllData();
               setSelectedDeckId(newDeckId);
@@ -1370,6 +1140,13 @@ export const App: React.FC = () => {
           <div className="flex flex-wrap items-center justify-center gap-3 shrink-0">
             <button
               type="button"
+              onClick={() => setActiveTab('about')}
+              className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-amber-300 font-semibold text-xs cursor-pointer"
+            >
+              The AetherVault Difference
+            </button>
+            <button
+              type="button"
               onClick={() => setLegalModalOpen(true)}
               className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 font-semibold text-xs cursor-pointer"
             >
@@ -1383,44 +1160,15 @@ export const App: React.FC = () => {
       <nav className="md:hidden fixed bottom-0 inset-x-0 z-40 bg-slate-950/95 backdrop-blur-lg border-t border-slate-800 px-2 py-1.5 grid grid-cols-5 gap-1">
         <button
           type="button"
-          onClick={() => setActiveTab('dashboard')}
+          onClick={() => setActiveTab('about')}
           className={`py-1.5 px-1.5 rounded-xl flex flex-col items-center justify-center gap-0.5 text-[10px] font-bold transition cursor-pointer ${
-            activeTab === 'dashboard'
+            activeTab === 'about'
               ? 'bg-amber-500 text-slate-950'
               : 'text-slate-400 hover:text-slate-200'
           }`}
         >
-          <LayoutDashboard className="w-4 h-4" />
-          <span>Home</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => {
-            setInventoryLocationFilter('ALL');
-            setActiveTab('inventory');
-          }}
-          className={`py-1.5 px-1.5 rounded-xl flex flex-col items-center justify-center gap-0.5 text-[10px] font-bold transition cursor-pointer ${
-            activeTab === 'inventory'
-              ? 'bg-amber-500 text-slate-950'
-              : 'text-slate-400 hover:text-slate-200'
-          }`}
-        >
-          <FolderOpen className="w-4 h-4" />
-          <span>Collection</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setActiveTab('decks')}
-          className={`py-1.5 px-1.5 rounded-xl flex flex-col items-center justify-center gap-0.5 text-[10px] font-bold transition cursor-pointer ${
-            activeTab === 'decks'
-              ? 'bg-amber-500 text-slate-950'
-              : 'text-slate-400 hover:text-slate-200'
-          }`}
-        >
-          <Layers className="w-4 h-4" />
-          <span>Decks</span>
+          <Sparkles className="w-4 h-4" />
+          <span>Explore</span>
         </button>
 
         <button
@@ -1438,18 +1186,332 @@ export const App: React.FC = () => {
 
         <button
           type="button"
-          onClick={() => {
-            setSearchModalTarget(activeTab === 'decks' && selectedDeckId ? 'deck' : 'inventory');
-            setSearchModalDeckId(selectedDeckId);
-            setSearchModalBoard('mainboard');
-            setSearchModalOpen(true);
-          }}
-          className="py-1.5 px-2 rounded-xl flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold text-amber-300 bg-amber-500/15 border border-amber-500/30 cursor-pointer"
+          onClick={() => handleSelectProtectedTab('dashboard')}
+          className={`py-1.5 px-1.5 rounded-xl flex flex-col items-center justify-center gap-0.5 text-[10px] font-bold transition cursor-pointer ${
+            activeTab === 'dashboard' && isAuthenticated
+              ? 'bg-amber-500 text-slate-950'
+              : 'text-slate-400 hover:text-slate-200'
+          }`}
         >
-          <Search className="w-4 h-4" />
-          <span>Add Cards</span>
+          <LayoutDashboard className="w-4 h-4" />
+          <span>My Vault</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => handleSelectProtectedTab('inventory')}
+          className={`py-1.5 px-1.5 rounded-xl flex flex-col items-center justify-center gap-0.5 text-[10px] font-bold transition cursor-pointer ${
+            activeTab === 'inventory' && isAuthenticated
+              ? 'bg-amber-500 text-slate-950'
+              : 'text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <FolderOpen className="w-4 h-4" />
+          <span>Collection</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => handleSelectProtectedTab('decks')}
+          className={`py-1.5 px-1.5 rounded-xl flex flex-col items-center justify-center gap-0.5 text-[10px] font-bold transition cursor-pointer ${
+            activeTab === 'decks' && isAuthenticated
+              ? 'bg-amber-500 text-slate-950'
+              : 'text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <Layers className="w-4 h-4" />
+          <span>Decks</span>
         </button>
       </nav>
+
+      {/* Dismissible Sign-In / Create Account / Forgot Password Modal */}
+      {authModalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 backdrop-blur-md p-4 overflow-y-auto"
+          onClick={() => setAuthModalOpen(false)}
+        >
+          <div
+            className="relative w-full max-w-md bg-slate-900/95 border border-slate-700 rounded-2xl p-6 sm:p-8 shadow-2xl space-y-5 my-auto"
+            onClick={e => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              onClick={() => setAuthModalOpen(false)}
+              className="absolute top-4 right-4 px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-bold cursor-pointer"
+              title="Close and continue exploring as guest"
+            >
+              ✕
+            </button>
+
+            <div className="flex flex-col items-center text-center space-y-2 pt-1">
+              <AetherVaultLogo size="md" showTagline={true} />
+            </div>
+
+            {/* Mode Toggle Tabs */}
+            <div className="grid grid-cols-2 gap-1.5 p-1 rounded-xl bg-slate-950 border border-slate-800">
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthMode('login');
+                  setAuthError(null);
+                  setAuthSuccessMsg(null);
+                }}
+                className={`py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer ${
+                  authMode === 'login' || authMode === 'forgot'
+                    ? 'bg-amber-500 text-slate-950 shadow-xs'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <KeyRound className="w-3.5 h-3.5" />
+                <span>Sign In</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthMode('register');
+                  setAuthError(null);
+                  setAuthSuccessMsg(null);
+                }}
+                className={`py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer ${
+                  authMode === 'register'
+                    ? 'bg-amber-500 text-slate-950 shadow-xs'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <UserPlus className="w-3.5 h-3.5" />
+                <span>Create Account</span>
+              </button>
+            </div>
+
+            {authError && (
+              <div className="p-3 rounded-xl bg-rose-950/70 border border-rose-500/40 text-xs text-rose-200 font-semibold">
+                {authError}
+              </div>
+            )}
+
+            {authSuccessMsg && (
+              <div className="p-3 rounded-xl bg-emerald-950/70 border border-emerald-500/40 text-xs text-emerald-200 font-semibold">
+                {authSuccessMsg}
+              </div>
+            )}
+
+            {authMode === 'forgot' ? (
+              !forgotCodeSent ? (
+                <form onSubmit={handleSendForgotCode} className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-300 mb-1.5">
+                      Recovery Email Address (or Username)
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="you@example.com or username"
+                      value={forgotIdentifier}
+                      onChange={e => setForgotIdentifier(e.target.value)}
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-sm text-slate-100 focus:outline-none focus:border-amber-500"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={authSubmitting}
+                    className="w-full py-3 rounded-xl bg-sky-500 hover:bg-sky-400 disabled:opacity-60 text-slate-950 font-black text-sm shadow-md transition cursor-pointer"
+                  >
+                    {authSubmitting ? 'Sending Code...' : 'Send 6-Digit Recovery Code'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAuthMode('login');
+                      setAuthError(null);
+                      setAuthSuccessMsg(null);
+                    }}
+                    className="w-full py-2 text-xs text-slate-400 hover:text-slate-200 font-semibold cursor-pointer"
+                  >
+                    ← Back to Sign In
+                  </button>
+                </form>
+              ) : (
+                <form onSubmit={handleResetPasswordWithCode} className="space-y-4">
+                  <div className="text-xs text-slate-400">
+                    Enter the 6-digit recovery code sent to <strong className="text-slate-200">{forgotMaskedEmail}</strong> and choose a new password:
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-300 mb-1.5">
+                      6-Digit Recovery Code
+                    </label>
+                    <input
+                      type="text"
+                      maxLength={6}
+                      required
+                      placeholder="123456"
+                      value={forgotCode}
+                      onChange={e => setForgotCode(e.target.value.replace(/\D/g, ''))}
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-sky-500/60 font-mono tracking-widest text-center text-base text-amber-300 focus:outline-none focus:border-amber-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-300 mb-1.5">
+                      New Password (4+ characters)
+                    </label>
+                    <input
+                      type="password"
+                      required
+                      placeholder="Enter new password"
+                      value={forgotNewPassword}
+                      onChange={e => setForgotNewPassword(e.target.value)}
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-sm text-slate-100 focus:outline-none focus:border-amber-500"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={authSubmitting}
+                    className="w-full py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-60 text-slate-950 font-black text-sm shadow-md transition cursor-pointer"
+                  >
+                    {authSubmitting ? 'Resetting Password...' : 'Reset Password & Sign In'}
+                  </button>
+                  <div className="flex items-center justify-between text-xs pt-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setForgotCodeSent(false);
+                        setAuthError(null);
+                      }}
+                      className="text-sky-400 hover:underline cursor-pointer"
+                    >
+                      Resend Code
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAuthMode('login');
+                        setForgotCodeSent(false);
+                        setAuthError(null);
+                        setAuthSuccessMsg(null);
+                      }}
+                      className="text-slate-400 hover:text-slate-200 cursor-pointer"
+                    >
+                      ← Back to Sign In
+                    </button>
+                  </div>
+                </form>
+              )
+            ) : (
+              <form onSubmit={handleAuthSubmit} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-bold text-slate-300 mb-1.5">
+                    {authMode === 'register' ? 'Username' : 'Username or Email Address'}
+                  </label>
+                  <input
+                    type="text"
+                    autoComplete="username"
+                    required
+                    placeholder={authMode === 'register' ? 'Choose a username' : 'Enter your username or email'}
+                    value={authUsername}
+                    onChange={e => setAuthUsername(e.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-sm text-slate-100 focus:outline-none focus:border-amber-500"
+                  />
+                </div>
+
+                {authMode === 'register' && (
+                  <div>
+                    <label className="block text-xs font-bold text-slate-300 mb-1.5">
+                      Email Address <span className="text-amber-400">(Required for Password Recovery)</span>
+                    </label>
+                    <input
+                      type="email"
+                      autoComplete="email"
+                      required
+                      placeholder="you@example.com"
+                      value={authEmail}
+                      onChange={e => setAuthEmail(e.target.value)}
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-sm text-slate-100 focus:outline-none focus:border-amber-500"
+                    />
+                  </div>
+                )}
+
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="block text-xs font-bold text-slate-300">
+                      Password
+                    </label>
+                    {authMode === 'login' && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAuthMode('forgot');
+                          setForgotIdentifier(authUsername);
+                          setForgotCodeSent(false);
+                          setAuthError(null);
+                          setAuthSuccessMsg(null);
+                        }}
+                        className="text-[11px] font-semibold text-sky-400 hover:text-sky-300 hover:underline cursor-pointer"
+                      >
+                        Forgot Password?
+                      </button>
+                    )}
+                  </div>
+                  <input
+                    type="password"
+                    autoComplete={authMode === 'register' ? 'new-password' : 'current-password'}
+                    required
+                    placeholder={authMode === 'register' ? 'Create a password (4+ characters)' : 'Enter your password'}
+                    value={authPassword}
+                    onChange={e => setAuthPassword(e.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-sm text-slate-100 focus:outline-none focus:border-amber-500"
+                  />
+                </div>
+
+                {authMode === 'register' && (
+                  <div>
+                    <label className="block text-xs font-bold text-slate-300 mb-1.5">
+                      Vault Badge Color
+                    </label>
+                    <select
+                      value={authColor}
+                      onChange={e => setAuthColor(e.target.value)}
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-xs text-slate-100 focus:outline-none focus:border-amber-500"
+                    >
+                      <option value="amber">Amber Gold</option>
+                      <option value="emerald">Emerald Green</option>
+                      <option value="sky">Sky Blue</option>
+                      <option value="violet">Violet Purple</option>
+                      <option value="rose">Crimson Rose</option>
+                      <option value="orange">Solar Orange</option>
+                    </select>
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={authSubmitting}
+                  className="w-full py-3 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-slate-950 font-black text-sm shadow-md shadow-amber-500/10 transition cursor-pointer"
+                >
+                  {authSubmitting
+                    ? 'Unlocking Vault...'
+                    : authMode === 'register'
+                      ? 'Create My Personal Vault'
+                      : 'Sign In to My Vault'}
+                </button>
+              </form>
+            )}
+
+            <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800/80 flex items-start gap-2.5 text-[11px] text-slate-400">
+              <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+              <span>
+                <strong className="text-slate-200">Private &amp; Isolated Library:</strong> Your card collection, binders, and Commander decks are strictly isolated to your account so no other user can alter or delete them.
+              </span>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setAuthModalOpen(false)}
+              className="w-full py-2 rounded-xl bg-slate-950 hover:bg-slate-800 border border-slate-800 text-xs font-bold text-slate-300 hover:text-amber-300 transition cursor-pointer"
+            >
+              Continue Exploring AetherVault as Guest →
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Global Scryfall Search & Add Modal */}
       <CardSearchModal

@@ -374,11 +374,20 @@ if (!initRow) {
       try {
         if (Array.isArray(snap.users)) {
           const insUser = db.prepare(`
-            INSERT OR REPLACE INTO users (id, name, email, avatar_color, created_at)
-            VALUES (?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
+            INSERT OR REPLACE INTO users (id, name, email, email_verified, avatar_color, password_hash, password_salt, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
           `);
           for (const u of snap.users) {
-            insUser.run(u.id, u.name, u.email || '', u.avatar_color || 'amber', u.created_at || null);
+            insUser.run(
+              u.id,
+              u.name,
+              u.email || '',
+              u.email_verified ? 1 : 0,
+              u.avatar_color || 'amber',
+              u.password_hash || '',
+              u.password_salt || '',
+              u.created_at || null
+            );
           }
         }
 

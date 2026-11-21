@@ -239,6 +239,12 @@ function isPublicHostRequest(req) {
 function resolveRequestAuth(req, url) {
   const isPublic = isPublicHostRequest(req);
   const token = extractSessionToken(req);
+  const hasExplicitHeaderToken = Boolean(
+    (req.headers['x-auth-token'] && String(req.headers['x-auth-token']).trim()) ||
+      (req.headers['authorization'] && String(req.headers['authorization']).trim())
+  );
+  const rawHeaderUserId = Number(req.headers['x-user-id'] || url.searchParams.get('userId') || 0);
+  const explicitRequestedId = Number.isFinite(rawHeaderUserId) && rawHeaderUserId >= 1 ? rawHeaderUserId : null;
 
   if (token) {
     const tokenHash = hashSessionToken(token);
@@ -251,21 +257,28 @@ function resolveRequestAuth(req, url) {
       )
       .get(tokenHash, token);
     if (sess) {
-      // Automatically upgrade any legacy unhashed session row in-place to SHA-256 hash at rest
-      if (sess.token === token && sess.token !== tokenHash) {
-        try {
-          db.prepare(`UPDATE user_sessions SET token = ? WHERE token = ?`).run(tokenHash, token);
-        } catch {
-          // ignore
+      const sessUserId = Number(sess.user_id);
+      // If the user explicitly clicked "Switch Vault" to a different profile ID and did not send a header token for the old user,
+      // do not let the old HttpOnly cookie force them back onto the previous account!
+      const isStaleCookieForDifferentProfile =
+        !hasExplicitHeaderToken && explicitRequestedId !== null && explicitRequestedId !== sessUserId;
+
+      if (!isStaleCookieForDifferentProfile) {
+        if (sess.token === token && sess.token !== tokenHash) {
+          try {
+            db.prepare(`UPDATE user_sessions SET token = ? WHERE token = ?`).run(tokenHash, token);
+          } catch {
+            // ignore
+          }
         }
+        return {
+          authenticated: true,
+          userId: sessUserId,
+          token,
+          tokenHash,
+          isPublic
+        };
       }
-      return {
-        authenticated: true,
-        userId: Number(sess.user_id),
-        token,
-        tokenHash,
-        isPublic
-      };
     }
   }
 

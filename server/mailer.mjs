@@ -1,29 +1,167 @@
+import tls from 'node:tls';
+
 /**
  * AetherVault Email Delivery Service (Verification & Password Recovery)
  *
  * Supports out-of-the-box delivery via:
- *   1. Resend (RESEND_API_KEY) — Recommended for aether-vault.com / aether-vault.net
- *   2. SendGrid (SENDGRID_API_KEY)
- *   3. Brevo / Sendinblue (BREVO_API_KEY)
- *   4. Custom Webhook (EMAIL_WEBHOOK_URL)
+ *   1. Gmail App Password (GMAIL_APP_PASSWORD + optional GMAIL_USER, defaults to bostain1992@gmail.com)
+ *   2. Brevo / Sendinblue (BREVO_API_KEY)
+ *   3. Resend (RESEND_API_KEY)
+ *   4. SendGrid (SENDGRID_API_KEY)
+ *   5. Custom Webhook (EMAIL_WEBHOOK_URL)
  *
- * If no external email API key is configured yet, falls back to console logging + devPreviewCode
- * so users and admins can still test and verify accounts without getting locked out.
+ * Security Guarantee: Verification and password-recovery codes are NEVER returned to the browser UI.
  */
 
+const DEFAULT_GMAIL = process.env.GMAIL_USER || 'bostain1992@gmail.com';
 const EMAIL_FROM = process.env.EMAIL_FROM || 'AetherVault <noreply@aether-vault.com>';
 
 export function isEmailProviderConfigured() {
   return Boolean(
-    process.env.RESEND_API_KEY ||
-      process.env.SENDGRID_API_KEY ||
+    process.env.GMAIL_APP_PASSWORD ||
       process.env.BREVO_API_KEY ||
+      process.env.RESEND_API_KEY ||
+      process.env.SENDGRID_API_KEY ||
       process.env.EMAIL_WEBHOOK_URL
   );
 }
 
+/**
+ * Built-in zero-dependency SMTPS client over TLS (smtp.gmail.com:465)
+ */
+function sendViaGmailSmtps({ gmailUser, appPassword, to, subject, html }) {
+  return new Promise((resolve, reject) => {
+    const cleanPass = String(appPassword).replace(/\s+/g, '');
+    const socket = tls.connect(465, 'smtp.gmail.com', { servername: 'smtp.gmail.com' });
+    let buffer = '';
+    let step = 0;
+    let finished = false;
+
+    const timeout = setTimeout(() => {
+      if (!finished) {
+        finished = true;
+        socket.destroy();
+        reject(new Error('Gmail SMTP connection timed out'));
+      }
+    }, 15000);
+
+    function done(err, res) {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeout);
+      try {
+        socket.end();
+      } catch {}
+      if (err) reject(err);
+      else resolve(res);
+    }
+
+    function sendCmd(cmd) {
+      socket.write(`${cmd}\r\n`);
+    }
+
+    socket.on('error', err => done(err));
+
+    socket.on('data', chunk => {
+      buffer += chunk.toString('utf-8');
+      const lines = buffer.split('\r\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line) continue;
+        // Multi-line SMTP responses have a hyphen at index 3 (e.g. "250-..."); wait for the final line ("250 ...")
+        if (line.length >= 4 && line[3] === '-') continue;
+        const code = Number(line.slice(0, 3));
+
+        if (code >= 400) {
+          return done(new Error(`SMTP Error (${code}): ${line}`));
+        }
+
+        if (step === 0 && code === 220) {
+          step = 1;
+          sendCmd('EHLO aether-vault.com');
+        } else if (step === 1 && code === 250) {
+          step = 2;
+          sendCmd('AUTH LOGIN');
+        } else if (step === 2 && code === 334) {
+          step = 3;
+          sendCmd(Buffer.from(gmailUser, 'utf-8').toString('base64'));
+        } else if (step === 3 && code === 334) {
+          step = 4;
+          sendCmd(Buffer.from(cleanPass, 'utf-8').toString('base64'));
+        } else if (step === 4 && code === 235) {
+          step = 5;
+          sendCmd(`MAIL FROM:<${gmailUser}>`);
+        } else if (step === 5 && code === 250) {
+          step = 6;
+          sendCmd(`RCPT TO:<${to}>`);
+        } else if (step === 6 && code === 250) {
+          step = 7;
+          sendCmd('DATA');
+        } else if (step === 7 && code === 354) {
+          step = 8;
+          const msg = [
+            `From: "AetherVault" <${gmailUser}>`,
+            `To: <${to}>`,
+            `Subject: ${subject}`,
+            'MIME-Version: 1.0',
+            'Content-Type: text/html; charset=UTF-8',
+            '',
+            html,
+            '.'
+          ].join('\r\n');
+          sendCmd(msg);
+        } else if (step === 8 && code === 250) {
+          step = 9;
+          sendCmd('QUIT');
+          return done(null, { delivered: true, provider: 'gmail-smtps' });
+        }
+      }
+    });
+  });
+}
+
 async function dispatchEmail({ to, subject, html, text }) {
-  // 1. Resend API (https://resend.com)
+  // 1. Gmail App Password via SMTPS (port 465)
+  if (process.env.GMAIL_APP_PASSWORD) {
+    return await sendViaGmailSmtps({
+      gmailUser: DEFAULT_GMAIL,
+      appPassword: process.env.GMAIL_APP_PASSWORD,
+      to,
+      subject,
+      html
+    });
+  }
+
+  // 2. Brevo (Sendinblue) HTTPS API (https://brevo.com)
+  if (process.env.BREVO_API_KEY) {
+    const brevoFrom = process.env.EMAIL_FROM || `AetherVault <${DEFAULT_GMAIL}>`;
+    const fromMatch = brevoFrom.match(/^(.*?)\s*<([^>]+)>$/);
+    const sender = fromMatch
+      ? { name: fromMatch[1].trim(), email: fromMatch[2].trim() }
+      : { name: 'AetherVault', email: brevoFrom.trim() };
+    const res = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST',
+      headers: {
+        'api-key': process.env.BREVO_API_KEY,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        sender,
+        to: [{ email: to }],
+        subject,
+        htmlContent: html,
+        textContent: text
+      })
+    });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      throw new Error(`Brevo API error (${res.status}): ${errText}`);
+    }
+    return { delivered: true, provider: 'brevo' };
+  }
+
+  // 3. Resend HTTPS API (https://resend.com)
   if (process.env.RESEND_API_KEY) {
     const res = await fetch('https://api.resend.com/emails', {
       method: 'POST',
@@ -46,7 +184,7 @@ async function dispatchEmail({ to, subject, html, text }) {
     return { delivered: true, provider: 'resend' };
   }
 
-  // 2. SendGrid API
+  // 4. SendGrid HTTPS API
   if (process.env.SENDGRID_API_KEY) {
     const fromMatch = EMAIL_FROM.match(/^(.*?)\s*<([^>]+)>$/);
     const fromObj = fromMatch
@@ -75,34 +213,7 @@ async function dispatchEmail({ to, subject, html, text }) {
     return { delivered: true, provider: 'sendgrid' };
   }
 
-  // 3. Brevo (Sendinblue) API
-  if (process.env.BREVO_API_KEY) {
-    const fromMatch = EMAIL_FROM.match(/^(.*?)\s*<([^>]+)>$/);
-    const sender = fromMatch
-      ? { name: fromMatch[1].trim(), email: fromMatch[2].trim() }
-      : { name: 'AetherVault', email: EMAIL_FROM.trim() };
-    const res = await fetch('https://api.brevo.com/v3/smtp/email', {
-      method: 'POST',
-      headers: {
-        'api-key': process.env.BREVO_API_KEY,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        sender,
-        to: [{ email: to }],
-        subject,
-        htmlContent: html,
-        textContent: text
-      })
-    });
-    if (!res.ok) {
-      const errText = await res.text().catch(() => '');
-      throw new Error(`Brevo API error (${res.status}): ${errText}`);
-    }
-    return { delivered: true, provider: 'brevo' };
-  }
-
-  // 4. Custom Webhook
+  // 5. Custom Webhook
   if (process.env.EMAIL_WEBHOOK_URL) {
     const res = await fetch(process.env.EMAIL_WEBHOOK_URL, {
       method: 'POST',
@@ -115,12 +226,9 @@ async function dispatchEmail({ to, subject, html, text }) {
     return { delivered: true, provider: 'webhook' };
   }
 
-  // 5. Fallback when no external email provider key is configured yet
-  console.log(`\n📧 [AetherVault Email Dispatch]`);
-  console.log(`   To:      ${to}`);
-  console.log(`   Subject: ${subject}`);
-  console.log(`   Body:    ${text.replace(/\n+/g, ' ')}\n`);
-  return { delivered: false, provider: 'console-preview' };
+  // No provider configured
+  console.warn(`[AetherVault Email] Email provider not configured yet. Could not send email to ${to}.`);
+  return { delivered: false, provider: 'unconfigured' };
 }
 
 export async function sendVerificationEmail(toEmail, username, code) {

@@ -653,8 +653,7 @@ async function handleApi(req, res, url) {
           user: userObj,
           isPublic: auth.isPublic,
           verificationSent: true,
-          emailDelivered: mailResult.delivered,
-          devPreviewCode: mailResult.delivered ? undefined : verifyCode
+          emailDelivered: mailResult.delivered
         },
         { 'Set-Cookie': cookieHeader }
       );
@@ -858,15 +857,19 @@ async function handleApi(req, res, url) {
         console.error('[AetherVault] Verification email error:', mailErr?.message || mailErr);
       }
 
+      if (!mailResult.delivered) {
+        return sendJson(res, 503, {
+          error:
+            'Outbound email delivery is not configured yet on the server. Add GMAIL_APP_PASSWORD, BREVO_API_KEY, or RESEND_API_KEY in your Render Environment Variables.'
+        });
+      }
+
       return sendJson(res, 200, {
         ok: true,
         email: targetEmail,
         user: getSingleUserWithStats(auth.userId),
-        emailDelivered: mailResult.delivered,
-        devPreviewCode: mailResult.delivered ? undefined : verifyCode,
-        message: mailResult.delivered
-          ? `Sent a 6-digit verification code to ${targetEmail}.`
-          : `Verification code generated for ${targetEmail}.`
+        emailDelivered: true,
+        message: `Sent a 6-digit verification code to ${targetEmail}. Please check your email inbox.`
       });
     }
 
@@ -964,14 +967,17 @@ async function handleApi(req, res, url) {
       }
 
       const masked = maskEmailAddress(userRow.email);
+      if (!mailResult.delivered) {
+        return sendJson(res, 503, {
+          error:
+            'Outbound email delivery is not configured yet on the server. Add GMAIL_APP_PASSWORD, BREVO_API_KEY, or RESEND_API_KEY in your Render Environment Variables.'
+        });
+      }
       return sendJson(res, 200, {
         ok: true,
         maskedEmail: masked,
-        emailDelivered: mailResult.delivered,
-        devPreviewCode: mailResult.delivered ? undefined : resetCode,
-        message: mailResult.delivered
-          ? `Sent a 6-digit password recovery code to ${masked}.`
-          : `Generated a 6-digit password recovery code for ${masked}.`
+        emailDelivered: true,
+        message: `Sent a 6-digit password recovery code to ${masked}. Please check your email inbox.`
       });
     }
 
@@ -1357,8 +1363,7 @@ async function handleApi(req, res, url) {
         token,
         users: visibleUsers,
         verificationSent: true,
-        emailDelivered: mailResult.delivered,
-        devPreviewCode: mailResult.delivered ? undefined : verifyCode
+        emailDelivered: mailResult.delivered
       });
     }
 
@@ -1409,7 +1414,6 @@ async function handleApi(req, res, url) {
         const nextColor = body.avatar_color ?? existingUser.avatar_color;
         let verificationSent = false;
         let emailDelivered = false;
-        let devPreviewCode;
 
         if (emailChanged && nextEmail) {
           const verifyCode = generateSixDigitCode();
@@ -1425,9 +1429,8 @@ async function handleApi(req, res, url) {
           try {
             const mailRes = await sendVerificationEmail(nextEmail, nextName, verifyCode);
             emailDelivered = mailRes.delivered;
-            if (!mailRes.delivered) devPreviewCode = verifyCode;
           } catch {
-            devPreviewCode = verifyCode;
+            emailDelivered = false;
           }
         } else {
           db.prepare(`UPDATE users SET name = ?, email = ?, avatar_color = ? WHERE id = ?`).run(
@@ -1444,8 +1447,7 @@ async function handleApi(req, res, url) {
           user: updatedUser,
           users: visibleUsers,
           verificationSent,
-          emailDelivered,
-          devPreviewCode
+          emailDelivered
         });
       }
 

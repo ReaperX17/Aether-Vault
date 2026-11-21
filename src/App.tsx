@@ -127,13 +127,11 @@ export const App: React.FC = () => {
   const [forgotMaskedEmail, setForgotMaskedEmail] = useState('');
   const [forgotCode, setForgotCode] = useState('');
   const [forgotNewPassword, setForgotNewPassword] = useState('');
-  const [devResetCodePreview, setDevResetCodePreview] = useState<string | null>(null);
 
   // Dedicated Change Username, Email & Email Verification state
   const [accountUsernameInput, setAccountUsernameInput] = useState('');
   const [accountEmailInput, setAccountEmailInput] = useState('');
   const [verificationCodeInput, setVerificationCodeInput] = useState('');
-  const [devVerificationCodePreview, setDevVerificationCodePreview] = useState<string | null>(null);
 
   // Password Change state
   const [currentPasswordInput, setCurrentPasswordInput] = useState('');
@@ -400,9 +398,6 @@ export const App: React.FC = () => {
         saveUserSessionToken(json.user.id, json.token);
         setActiveUserId(json.user.id);
       }
-      if (json.devPreviewCode) {
-        setDevVerificationCodePreview(json.devPreviewCode);
-      }
       setAuthPassword('');
       setIsAuthenticated(true);
       setSelectedDeckId(null);
@@ -413,8 +408,8 @@ export const App: React.FC = () => {
         setProfileErrorMsg(null);
         setProfileSuccessMsg(
           json.emailDelivered
-            ? `Account created! We sent a 6-digit verification code to ${authEmail.trim()}. Enter it below to verify your email.`
-            : `Account created! Enter your 6-digit verification code (${json.devPreviewCode}) below to complete email verification.`
+            ? `Account created! We sent a 6-digit verification code to ${authEmail.trim()}. Check your email inbox and enter it below.`
+            : `Account created! Configure GMAIL_APP_PASSWORD or BREVO_API_KEY in Render Environment Variables to send verification emails.`
         );
         setProfilesModalOpen(true);
       } else {
@@ -431,7 +426,6 @@ export const App: React.FC = () => {
     e.preventDefault();
     setAuthError(null);
     setAuthSuccessMsg(null);
-    setDevResetCodePreview(null);
     const trimmed = forgotIdentifier.trim();
     if (!trimmed) {
       setAuthError('Please enter your email address or username.');
@@ -452,10 +446,7 @@ export const App: React.FC = () => {
       }
       setForgotCodeSent(true);
       setForgotMaskedEmail(json.maskedEmail || trimmed);
-      if (json.devPreviewCode) {
-        setDevResetCodePreview(json.devPreviewCode);
-      }
-      setAuthSuccessMsg(json.message || 'Sent 6-digit recovery code!');
+      setAuthSuccessMsg(json.message || 'Sent 6-digit recovery code to your email!');
     } catch {
       setAuthError('Unable to reach AetherVault server.');
     } finally {
@@ -499,7 +490,6 @@ export const App: React.FC = () => {
       setForgotCode('');
       setForgotNewPassword('');
       setForgotCodeSent(false);
-      setDevResetCodePreview(null);
       setIsAuthenticated(true);
       await fetchAllData();
     } catch {
@@ -538,15 +528,12 @@ export const App: React.FC = () => {
       return;
     }
     if (Array.isArray(json.users)) setUserProfiles(json.users);
-    if (json.devPreviewCode) {
-      setDevVerificationCodePreview(json.devPreviewCode);
-    }
     if (json.verificationSent) {
-      setProfileSuccessMsg(
-        json.emailDelivered
-          ? `Saved! We sent a 6-digit verification code to ${nextEmail}. Enter it below to verify your email.`
-          : `Saved! Enter the 6-digit verification code (${json.devPreviewCode}) below to verify ${nextEmail}.`
-      );
+      if (json.emailDelivered) {
+        setProfileSuccessMsg(`Saved! We sent a 6-digit verification code to ${nextEmail}. Check your email inbox and enter it below.`);
+      } else {
+        setProfileErrorMsg(`Saved username & email, but outbound email delivery is not configured yet on the server (add GMAIL_APP_PASSWORD or BREVO_API_KEY in Render Environment Variables).`);
+      }
     } else {
       setProfileSuccessMsg('Username and email updated!');
     }
@@ -570,14 +557,7 @@ export const App: React.FC = () => {
       setProfileErrorMsg(json.error || 'Could not send verification code.');
       return;
     }
-    if (json.devPreviewCode) {
-      setDevVerificationCodePreview(json.devPreviewCode);
-    }
-    setProfileSuccessMsg(
-      json.emailDelivered
-        ? `Sent a 6-digit verification code to ${targetEmail}!`
-        : `Verification code generated (${json.devPreviewCode}) — enter it below to verify!`
-    );
+    setProfileSuccessMsg(json.message || `Sent a 6-digit verification code to ${targetEmail}! Please check your email inbox.`);
     await fetchUsersAndNetwork();
   }
 
@@ -597,7 +577,6 @@ export const App: React.FC = () => {
     }
     if (Array.isArray(json.users)) setUserProfiles(json.users);
     setVerificationCodeInput('');
-    setDevVerificationCodePreview(null);
     setProfileSuccessMsg(json.message || 'Email verified for password recovery!');
   }
 
@@ -720,9 +699,6 @@ export const App: React.FC = () => {
       setNewProfileName('');
       setNewProfileEmail('');
       setNewProfilePin('');
-      if (json.devPreviewCode) {
-        setDevVerificationCodePreview(json.devPreviewCode);
-      }
       if (json.user) {
         saveUserSessionToken(json.user.id, json.token);
         setActiveUserId(json.user.id);
@@ -732,7 +708,7 @@ export const App: React.FC = () => {
         setProfileSuccessMsg(
           json.emailDelivered
             ? `Account created! Enter the 6-digit code sent to ${trimmedEmail} below to verify your email.`
-            : `Account created! Enter the 6-digit verification code (${json.devPreviewCode}) below to verify ${trimmedEmail}.`
+            : `Account created! Configure GMAIL_APP_PASSWORD or BREVO_API_KEY in Render Environment Variables to send verification emails.`
         );
       }
     } catch {
@@ -834,13 +810,8 @@ export const App: React.FC = () => {
           )}
 
           {authSuccessMsg && (
-            <div className="p-3 rounded-xl bg-emerald-950/70 border border-emerald-500/40 text-xs text-emerald-200 font-semibold space-y-1">
-              <div>{authSuccessMsg}</div>
-              {devResetCodePreview && (
-                <div className="font-mono text-amber-300">
-                  Verification / Recovery Code: <strong>{devResetCodePreview}</strong>
-                </div>
-              )}
+            <div className="p-3 rounded-xl bg-emerald-950/70 border border-emerald-500/40 text-xs text-emerald-200 font-semibold">
+              {authSuccessMsg}
             </div>
           )}
 
@@ -1814,7 +1785,7 @@ export const App: React.FC = () => {
               </form>
 
               {/* 6-Digit Email Verification Box */}
-              {(!activeUserProfile.email_verified || devVerificationCodePreview) && (
+              {!activeUserProfile.email_verified && (
                 <form
                   onSubmit={handleVerifyEmailCode}
                   className="mt-2 p-3 rounded-xl bg-slate-900/90 border border-sky-500/40 space-y-2"
@@ -1822,13 +1793,8 @@ export const App: React.FC = () => {
                   <div className="text-xs font-bold text-sky-300 flex items-center justify-between">
                     <span className="flex items-center gap-1.5">
                       <Mail className="w-3.5 h-3.5 text-sky-400" />
-                      Verify Your Email Address
+                      Verify Your Email Address (Check Your Email Inbox)
                     </span>
-                    {devVerificationCodePreview && (
-                      <span className="font-mono text-[11px] text-amber-300">
-                        Code: <strong>{devVerificationCodePreview}</strong>
-                      </span>
-                    )}
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
                     <input

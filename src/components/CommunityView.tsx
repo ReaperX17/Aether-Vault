@@ -936,10 +936,13 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
                               {item.name}
                             </div>
                             <div className="text-[11px] text-slate-400 truncate">
-                              {item.set_name} ({item.set_code.toUpperCase()}) • {item.location}
+                              {item.set_name || 'MTG'}
+                              {item.set_code ? ` (${String(item.set_code).toUpperCase()})` : ''} • {item.location || 'Main Binder'}
                             </div>
                           </div>
                           <DualPriceBadge
+                            card={item}
+                            finish={item.finish}
                             tcgUsd={item.unit_tcg}
                             ckRetail={item.unit_ck_retail}
                             tcgUrl={item.tcgplayer_url}

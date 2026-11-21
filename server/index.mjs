@@ -455,11 +455,13 @@ function getAllInventoryEnriched(userId = 1) {
 
   const rows = db.prepare(`
     SELECT
-      i.id, i.scryfall_id, i.name, i.set_code, i.collector_number,
-      i.quantity, i.finish, i.condition, i.language, i.location,
-      i.purchase_price, i.notes, i.created_at, i.updated_at,
-      c.oracle_id, c.set_name, c.mana_cost, c.cmc, c.type_line,
-      c.oracle_text, c.colors, c.color_identity, c.rarity,
+      i.id, i.scryfall_id, i.name,
+      COALESCE(NULLIF(i.set_code, ''), c.set_code, '') as set_code,
+      COALESCE(NULLIF(i.collector_number, ''), c.collector_number, '') as collector_number,
+      i.quantity, COALESCE(i.finish, 'nonfoil') as finish, COALESCE(i.condition, 'NM') as condition, COALESCE(i.language, 'EN') as language, COALESCE(i.location, 'Main Binder') as location,
+      i.purchase_price, COALESCE(i.notes, '') as notes, i.created_at, i.updated_at,
+      c.oracle_id, COALESCE(c.set_name, '') as set_name, COALESCE(c.mana_cost, '') as mana_cost, COALESCE(c.cmc, 0) as cmc, COALESCE(c.type_line, '') as type_line,
+      COALESCE(c.oracle_text, '') as oracle_text, c.colors, c.color_identity, COALESCE(c.rarity, 'common') as rarity,
       c.image_normal, c.image_small, c.image_art_crop,
       c.tcg_usd, c.tcg_usd_foil, c.tcg_usd_etched,
       c.tcgplayer_id, c.tcgplayer_url, c.cardkingdom_url,

@@ -8,11 +8,15 @@ export function formatUsd(val?: number | null): string {
 }
 
 interface DualPriceProps {
-  card: MtgCard;
+  card?: MtgCard | null;
   finish?: FinishType;
   quantity?: number;
   compact?: boolean;
   showBuylist?: boolean;
+  tcgUsd?: number | null;
+  ckRetail?: number | null;
+  tcgUrl?: string | null;
+  ckUrl?: string | null;
 }
 
 export const DualPriceBadge: React.FC<DualPriceProps> = ({
@@ -20,30 +24,53 @@ export const DualPriceBadge: React.FC<DualPriceProps> = ({
   finish = 'nonfoil',
   quantity = 1,
   compact = false,
-  showBuylist = false
+  showBuylist = false,
+  tcgUsd,
+  ckRetail,
+  tcgUrl: tcgUrlProp,
+  ckUrl: ckUrlProp
 }) => {
   const isFoil = finish === 'foil' || finish === 'etched';
 
-  const tcgUnit = finish === 'etched'
-    ? (card.tcg_usd_etched ?? card.tcg_usd_foil ?? card.tcg_usd)
-    : isFoil
-      ? (card.tcg_usd_foil ?? card.tcg_usd)
-      : (card.tcg_usd ?? card.tcg_usd_foil);
+  const tcgUnit =
+    tcgUsd !== undefined
+      ? tcgUsd
+      : card
+        ? finish === 'etched'
+          ? (card.tcg_usd_etched ?? card.tcg_usd_foil ?? card.tcg_usd)
+          : isFoil
+            ? (card.tcg_usd_foil ?? card.tcg_usd)
+            : (card.tcg_usd ?? card.tcg_usd_foil)
+        : null;
 
-  const ckRetailUnit = isFoil
-    ? (card.ck_retail_foil ?? card.ck_retail_nonfoil)
-    : (card.ck_retail_nonfoil ?? card.ck_retail_foil);
+  const ckRetailUnit =
+    ckRetail !== undefined
+      ? ckRetail
+      : card
+        ? isFoil
+          ? (card.ck_retail_foil ?? card.ck_retail_nonfoil)
+          : (card.ck_retail_nonfoil ?? card.ck_retail_foil)
+        : null;
 
-  const ckBuyUnit = isFoil
-    ? (card.ck_buylist_foil ?? card.ck_buylist_nonfoil)
-    : (card.ck_buylist_nonfoil ?? card.ck_buylist_foil);
+  const ckBuyUnit = card
+    ? isFoil
+      ? (card.ck_buylist_foil ?? card.ck_buylist_nonfoil)
+      : (card.ck_buylist_nonfoil ?? card.ck_buylist_foil)
+    : null;
 
   const tcgTotal = tcgUnit != null ? tcgUnit * quantity : null;
   const ckRetailTotal = ckRetailUnit != null ? ckRetailUnit * quantity : null;
   const ckBuyTotal = ckBuyUnit != null ? ckBuyUnit * quantity : null;
 
-  const tcgUrl = card.tcgplayer_url || `https://www.tcgplayer.com/search/magic/product?q=${encodeURIComponent(card.name)}`;
-  const ckUrl = card.cardkingdom_url || `https://www.cardkingdom.com/catalog/search?search=header&filter%5Bname%5D=${encodeURIComponent(card.name)}`;
+  const cardName = card?.name || '';
+  const tcgUrl =
+    tcgUrlProp ||
+    card?.tcgplayer_url ||
+    `https://www.tcgplayer.com/search/magic/product?q=${encodeURIComponent(cardName)}`;
+  const ckUrl =
+    ckUrlProp ||
+    card?.cardkingdom_url ||
+    `https://www.cardkingdom.com/catalog/search?search=header&filter%5Bname%5D=${encodeURIComponent(cardName)}`;
 
   if (compact) {
     return (

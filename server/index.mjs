@@ -850,17 +850,20 @@ async function handleApi(req, res, url) {
          WHERE id = ?`
       ).run(targetEmail, verifyCodeHash, verifyExpiresAt, auth.userId);
 
-      let mailResult = { delivered: false, provider: 'console-preview' };
+      let mailResult = { delivered: false, provider: 'unconfigured' };
+      let mailErrorDetail = '';
       try {
         mailResult = await sendVerificationEmail(targetEmail, userRow.name, verifyCode);
       } catch (mailErr) {
-        console.error('[AetherVault] Verification email error:', mailErr?.message || mailErr);
+        mailErrorDetail = mailErr?.message || String(mailErr);
+        console.error('[AetherVault] Verification email error:', mailErrorDetail);
       }
 
       if (!mailResult.delivered) {
         return sendJson(res, 503, {
-          error:
-            'Outbound email delivery is not configured yet on the server. Add GMAIL_APP_PASSWORD, BREVO_API_KEY, or RESEND_API_KEY in your Render Environment Variables.'
+          error: isEmailProviderConfigured()
+            ? `Email provider error: ${mailErrorDetail || 'Could not send email. Note: Render blocks Gmail SMTP port 465—use BREVO_API_KEY or RESEND_API_KEY over HTTPS instead.'}`
+            : 'Outbound email delivery is not configured yet on the server. Add BREVO_API_KEY or RESEND_API_KEY in your Render Environment Variables.'
         });
       }
 
@@ -959,18 +962,21 @@ async function handleApi(req, res, url) {
         `UPDATE users SET reset_code_hash = ?, reset_code_expires_at = ? WHERE id = ?`
       ).run(resetCodeHash, resetExpiresAt, userRow.id);
 
-      let mailResult = { delivered: false, provider: 'console-preview' };
+      let mailResult = { delivered: false, provider: 'unconfigured' };
+      let mailErrorDetail = '';
       try {
         mailResult = await sendPasswordResetEmail(userRow.email, userRow.name, resetCode);
       } catch (mailErr) {
-        console.error('[AetherVault] Password reset email error:', mailErr?.message || mailErr);
+        mailErrorDetail = mailErr?.message || String(mailErr);
+        console.error('[AetherVault] Password reset email error:', mailErrorDetail);
       }
 
       const masked = maskEmailAddress(userRow.email);
       if (!mailResult.delivered) {
         return sendJson(res, 503, {
-          error:
-            'Outbound email delivery is not configured yet on the server. Add GMAIL_APP_PASSWORD, BREVO_API_KEY, or RESEND_API_KEY in your Render Environment Variables.'
+          error: isEmailProviderConfigured()
+            ? `Email provider error: ${mailErrorDetail || 'Could not send email. Note: Render blocks Gmail SMTP port 465—use BREVO_API_KEY or RESEND_API_KEY over HTTPS instead.'}`
+            : 'Outbound email delivery is not configured yet on the server. Add BREVO_API_KEY or RESEND_API_KEY in your Render Environment Variables.'
         });
       }
       return sendJson(res, 200, {

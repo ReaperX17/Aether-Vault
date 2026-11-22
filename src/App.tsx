@@ -125,6 +125,7 @@ export const App: React.FC = () => {
   const [authChecking, setAuthChecking] = useState(true);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isPublicServer, setIsPublicServer] = useState(false);
+  const [activeDeviceSessions, setActiveDeviceSessions] = useState<number>(1);
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authMode, setAuthMode] = useState<'login' | 'register' | 'forgot'>('login');
   const [authUsername, setAuthUsername] = useState('');
@@ -217,6 +218,9 @@ export const App: React.FC = () => {
           return;
         }
         setIsAuthenticated(true);
+        if (typeof authJson.activeSessions === 'number' && authJson.activeSessions >= 1) {
+          setActiveDeviceSessions(authJson.activeSessions);
+        }
         if (authJson.user) {
           setActiveUserId(authJson.user.id);
           saveUserSessionToken(authJson.user.id, authJson.token);
@@ -1727,9 +1731,17 @@ export const App: React.FC = () => {
 
             {/* Existing Profiles List */}
             <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                  {isPublicServer ? 'Your Active Account' : 'Vault Accounts on This Server'}
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                    {isPublicServer ? 'Your Active Account' : 'Vault Accounts on This Server'}
+                  </div>
+                  <span className="px-2 py-0.5 rounded-full bg-sky-500/15 border border-sky-500/30 text-sky-300 text-[10px] font-bold flex items-center gap-1">
+                    <Smartphone className="w-3 h-3 text-sky-400" />
+                    <span>
+                      Active on {activeDeviceSessions} {activeDeviceSessions === 1 ? 'device' : 'devices'} (Phone &amp; Desktop Sync)
+                    </span>
+                  </span>
                 </div>
                 <button
                   type="button"
@@ -1737,7 +1749,7 @@ export const App: React.FC = () => {
                   className="px-3 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 font-bold text-xs flex items-center gap-1.5 cursor-pointer"
                 >
                   <LogOut className="w-3.5 h-3.5" />
-                  <span>Sign Out / Switch User</span>
+                  <span>Sign Out This Device</span>
                 </button>
               </div>
               <div className="space-y-2">

@@ -10,10 +10,10 @@ if (typeof window !== 'undefined' && !(window as any).__aethervaultFetchWrapped)
   window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
     const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
     if (urlStr.startsWith('/api/') || urlStr.includes('/api/')) {
-      const activeUserId = localStorage.getItem('aethervault_active_user_id') || '1';
+      const activeUserId = localStorage.getItem('aethervault_active_user_id');
       const authToken = localStorage.getItem('aethervault_auth_token') || '';
       const headers = new Headers(init?.headers || (input instanceof Request ? input.headers : undefined));
-      if (!headers.has('X-User-Id')) {
+      if (activeUserId && !headers.has('X-User-Id')) {
         headers.set('X-User-Id', activeUserId);
       }
       if (authToken && !headers.has('X-Auth-Token')) {

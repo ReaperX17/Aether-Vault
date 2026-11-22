@@ -232,20 +232,29 @@ function parseCookies(cookieHeader = '') {
   return out;
 }
 
-function extractSessionToken(req) {
+function extractCandidateSessionTokens(req) {
+  const candidates = [];
   const headerToken = req.headers['x-auth-token'];
   if (headerToken && typeof headerToken === 'string' && headerToken.trim()) {
-    return headerToken.trim();
+    candidates.push(headerToken.trim());
   }
   const authHeader = req.headers['authorization'];
   if (authHeader && typeof authHeader === 'string' && authHeader.toLowerCase().startsWith('bearer ')) {
-    return authHeader.slice(7).trim();
+    const bearer = authHeader.slice(7).trim();
+    if (bearer && !candidates.includes(bearer)) {
+      candidates.push(bearer);
+    }
   }
   const cookies = parseCookies(req.headers['cookie'] || '');
-  if (cookies.aethervault_session) {
-    return cookies.aethervault_session;
+  if (cookies.aethervault_session && !candidates.includes(cookies.aethervault_session)) {
+    candidates.push(cookies.aethervault_session);
   }
-  return null;
+  return candidates;
+}
+
+function extractSessionToken(req) {
+  const list = extractCandidateSessionTokens(req);
+  return list[0] || null;
 }
 
 function isPublicHostRequest(req) {
@@ -268,7 +277,7 @@ function isPublicHostRequest(req) {
 
 function resolveRequestAuth(req, url) {
   const isPublic = isPublicHostRequest(req);
-  const token = extractSessionToken(req);
+  const candidateTokens = extractCandidateSessionTokens(req);
   const hasExplicitHeaderToken = Boolean(
     (req.headers['x-auth-token'] && String(req.headers['x-auth-token']).trim()) ||
       (req.headers['authorization'] && String(req.headers['authorization']).trim())
@@ -276,7 +285,7 @@ function resolveRequestAuth(req, url) {
   const rawHeaderUserId = Number(req.headers['x-user-id'] || url.searchParams.get('userId') || 0);
   const explicitRequestedId = Number.isFinite(rawHeaderUserId) && rawHeaderUserId >= 1 ? rawHeaderUserId : null;
 
-  if (token) {
+  for (const token of candidateTokens) {
     const tokenHash = hashSessionToken(token);
     const sess = db
       .prepare(
@@ -288,10 +297,10 @@ function resolveRequestAuth(req, url) {
       .get(tokenHash, token);
     if (sess) {
       const sessUserId = Number(sess.user_id);
-      // If the user explicitly clicked "Switch Vault" to a different profile ID and did not send a header token for the old user,
-      // do not let the old HttpOnly cookie force them back onto the previous account!
+      // On local non-public servers only, if the user explicitly switched to a different local passwordless profile ID,
+      // do not let the old HttpOnly cookie override the local profile switch
       const isStaleCookieForDifferentProfile =
-        !hasExplicitHeaderToken && explicitRequestedId !== null && explicitRequestedId !== sessUserId;
+        !isPublic && !hasExplicitHeaderToken && explicitRequestedId !== null && explicitRequestedId !== sessUserId;
 
       if (!isStaleCookieForDifferentProfile) {
         if (sess.token === token && sess.token !== tokenHash) {
@@ -625,6 +634,18 @@ async function handleApi(req, res, url) {
         });
       }
       const activeToken = auth.token || createSession(auth.userId);
+      if (auth.tokenHash || auth.token) {
+        const nextExpiry = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString();
+        try {
+          db.prepare(`UPDATE user_sessions SET expires_at = ? WHERE token = ? OR token = ?`).run(
+            nextExpiry,
+            auth.tokenHash || hashSessionToken(activeToken),
+            activeToken
+          );
+        } catch {
+          // ignore
+        }
+      }
       const userObj = getSingleUserWithStats(auth.userId);
       const sessionCount =
         db

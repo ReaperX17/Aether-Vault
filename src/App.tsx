@@ -119,6 +119,7 @@ export const App: React.FC = () => {
   const [profileErrorMsg, setProfileErrorMsg] = useState<string | null>(null);
   const [profileSuccessMsg, setProfileSuccessMsg] = useState<string | null>(null);
   const [serverOffline, setServerOffline] = useState(false);
+  const [liveVersion, setLiveVersion] = useState<number>(0);
 
   // Full Authentication & Account Isolation state
   const [authChecking, setAuthChecking] = useState(true);
@@ -276,6 +277,55 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     fetchAllData();
+  }, [fetchAllData]);
+
+  // Real-time Server-Sent Events (SSE) subscription + window focus sync so new users, new decks,
+  // follows, and card updates appear automatically across all tabs and users in real time
+  useEffect(() => {
+    let es: EventSource | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let unmounted = false;
+
+    const connectSse = () => {
+      if (unmounted) return;
+      try {
+        es = new EventSource('/api/events');
+        es.addEventListener('vault_update', () => {
+          setLiveVersion(v => v + 1);
+          fetchAllData();
+        });
+        es.onerror = () => {
+          if (es) {
+            es.close();
+            es = null;
+          }
+          if (!unmounted) {
+            reconnectTimer = setTimeout(connectSse, 4000);
+          }
+        };
+      } catch {
+        // Fallback if EventSource is blocked
+      }
+    };
+
+    connectSse();
+
+    const onWindowFocusOrVisible = () => {
+      if (document.visibilityState === 'visible') {
+        setLiveVersion(v => v + 1);
+        fetchAllData();
+      }
+    };
+    window.addEventListener('focus', onWindowFocusOrVisible);
+    document.addEventListener('visibilitychange', onWindowFocusOrVisible);
+
+    return () => {
+      unmounted = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (es) es.close();
+      window.removeEventListener('focus', onWindowFocusOrVisible);
+      document.removeEventListener('visibilitychange', onWindowFocusOrVisible);
+    };
   }, [fetchAllData]);
 
   useEffect(() => {
@@ -1083,6 +1133,7 @@ export const App: React.FC = () => {
             decks={decks}
             folders={deckFolders}
             selectedDeckId={selectedDeckId}
+            liveVersion={liveVersion}
             onSelectDeck={id => setSelectedDeckId(id)}
             onOpenSearchForDeck={(deckId, board = 'mainboard') => {
               setSearchModalTarget('deck');
@@ -1098,6 +1149,7 @@ export const App: React.FC = () => {
           <CommunityView
             currentUserId={isAuthenticated ? activeUserId : 0}
             isAuthenticated={isAuthenticated}
+            liveVersion={liveVersion}
             onRequireAuth={mode => openAuthModal(mode)}
             onDeckCloned={async newDeckId => {
               await fetchAllData();

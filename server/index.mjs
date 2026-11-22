@@ -48,12 +48,42 @@ process.on('unhandledRejection', reason => {
 let dataCacheVersion = 1;
 const cachedInventoryByUser = new Map();
 const cachedDecksByUser = new Map();
+const sseClients = new Set();
 
-function invalidateDataCache() {
+function broadcastVaultUpdate(reason = 'update') {
+  const payload = JSON.stringify({
+    version: dataCacheVersion,
+    reason,
+    timestamp: Date.now()
+  });
+  const msg = `event: vault_update\ndata: ${payload}\n\n`;
+  for (const clientRes of sseClients) {
+    try {
+      clientRes.write(msg);
+    } catch {
+      sseClients.delete(clientRes);
+    }
+  }
+}
+
+function invalidateDataCache(reason = 'update', broadcast = true) {
   dataCacheVersion++;
   cachedInventoryByUser.clear();
   cachedDecksByUser.clear();
+  if (broadcast) {
+    broadcastVaultUpdate(reason);
+  }
 }
+
+setInterval(() => {
+  for (const clientRes of sseClients) {
+    try {
+      clientRes.write(`: heartbeat ${Date.now()}\n\n`);
+    } catch {
+      sseClients.delete(clientRes);
+    }
+  }
+}, 20000).unref();
 
 function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
   const hash = crypto.scryptSync(String(password), salt, 64).toString('hex');
@@ -419,6 +449,9 @@ function getSecurityHeaders(isPublic = false) {
 }
 
 function sendJson(res, status, payload, extraHeaders = {}) {
+  if (res.__reqMethod && res.__reqMethod !== 'GET' && status >= 200 && status < 300) {
+    invalidateDataCache(res.__reqPath || 'mutation', true);
+  }
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
@@ -539,17 +572,37 @@ function getDeckCardsEnriched(deckId) {
 async function handleApi(req, res, url) {
   const pathname = url.pathname;
   const method = req.method || 'GET';
+  res.__reqMethod = method;
+  res.__reqPath = pathname;
 
   if (method !== 'GET') {
-    invalidateDataCache();
+    invalidateDataCache(pathname, false);
   }
 
   try {
+    // Real-time Server-Sent Events (SSE) stream for instant live updates across tabs & users
+    if (pathname === '/api/events' && method === 'GET') {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache, no-transform',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no',
+        ...getSecurityHeaders(isProd)
+      });
+      res.write(`event: connected\ndata: ${JSON.stringify({ version: dataCacheVersion, timestamp: Date.now() })}\n\n`);
+      sseClients.add(res);
+      req.on('close', () => {
+        sseClients.delete(res);
+      });
+      return;
+    }
+
     // Healthcheck endpoint for Cloud / Docker / Load Balancers (aether-vault.com & aether-vault.net)
     if (pathname === '/api/health' && method === 'GET') {
       return sendJson(res, 200, {
         status: 'ok',
         service: 'AetherVault',
+        dataVersion: dataCacheVersion,
         timestamp: new Date().toISOString()
       });
     }
@@ -1636,7 +1689,8 @@ async function handleApi(req, res, url) {
       return sendJson(res, 200, {
         decks: communityDecks,
         players,
-        followingIds: Array.from(followingSet)
+        followingIds: Array.from(followingSet),
+        dataVersion: dataCacheVersion
       });
     }
 

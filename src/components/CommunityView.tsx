@@ -29,6 +29,7 @@ import { evaluateDeckBracketAndSalt } from '../deckBracketAndSalt';
 interface CommunityViewProps {
   currentUserId: number;
   isAuthenticated?: boolean;
+  liveVersion?: number;
   onRequireAuth?: (mode: 'login' | 'register') => void;
   onDeckCloned: (newDeckId: number) => void;
 }
@@ -76,6 +77,7 @@ const SECTION_ORDER = [
 export const CommunityView: React.FC<CommunityViewProps> = ({
   currentUserId,
   isAuthenticated = true,
+  liveVersion = 0,
   onRequireAuth,
   onDeckCloned
 }) => {
@@ -118,15 +120,10 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
   const [zoomContext, setZoomContext] = useState<'deck' | 'player_collection'>('deck');
   const [flippedCardKeys, setFlippedCardKeys] = useState<Record<string, boolean>>({});
 
-  const fetchCommunityExplore = useCallback(async () => {
-    setLoading(true);
+  const fetchCommunityExplore = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
-      const params = new URLSearchParams();
-      if (searchQuery.trim()) params.set('q', searchQuery.trim());
-      if (subTab === 'following') params.set('onlyFollowing', 'true');
-      if (colorFilter !== 'ALL') params.set('color', colorFilter);
-
-      const res = await fetch(`/api/community/explore?${params.toString()}`);
+      const res = await fetch('/api/community/explore');
       if (res.ok) {
         const json = await res.json();
         setCommunityDecks(json.decks || []);
@@ -135,12 +132,42 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
     } catch (e) {
       console.error('Failed to load community explore:', e);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
-  }, [searchQuery, subTab, colorFilter]);
+  }, []);
 
   useEffect(() => {
-    fetchCommunityExplore();
+    fetchCommunityExplore(false);
+  }, [fetchCommunityExplore, currentUserId, isAuthenticated]);
+
+  // Real-time refresh whenever SSE broadcasts a vault_update (new user, new deck, follow/unfollow, card added)
+  useEffect(() => {
+    if (liveVersion === 0) return;
+    fetchCommunityExplore(true);
+    if (selectedPlayerId !== null) {
+      fetch(`/api/community/users/${selectedPlayerId}`)
+        .then(r => (r.ok ? r.json() : null))
+        .then(data => {
+          if (data) setPlayerDetail(data);
+        })
+        .catch(() => {});
+    }
+    if (selectedDeckId !== null) {
+      fetch(`/api/community/decks/${selectedDeckId}`)
+        .then(r => (r.ok ? r.json() : null))
+        .then(data => {
+          if (data) setDeckDetail(data);
+        })
+        .catch(() => {});
+    }
+  }, [liveVersion, fetchCommunityExplore, selectedPlayerId, selectedDeckId]);
+
+  // Background heartbeat poll fallback every 8 seconds so even behind buffering proxies new users & decks appear automatically
+  useEffect(() => {
+    const timer = setInterval(() => {
+      fetchCommunityExplore(true);
+    }, 8000);
+    return () => clearInterval(timer);
   }, [fetchCommunityExplore]);
 
   async function handleInspectPlayer(targetUserId: number, initialTab: 'decks' | 'collection' = 'decks') {
@@ -331,6 +358,36 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
   const followedPlayers = useMemo(() => {
     return players.filter(p => p.isFollowing);
   }, [players]);
+
+  const displayedPlayers = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return players;
+    return players.filter(p => (p.name || '').toLowerCase().includes(q));
+  }, [players, searchQuery]);
+
+  const displayedDecks = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return communityDecks.filter(d => {
+      if (subTab === 'following' && !d.is_following_author) return false;
+      if (colorFilter !== 'ALL') {
+        const cols = d.color_identity || [];
+        if (colorFilter === 'C') {
+          if (cols.length > 0) return false;
+        } else if (!cols.includes(colorFilter)) {
+          return false;
+        }
+      }
+      if (q) {
+        const matchName = (d.name || '').toLowerCase().includes(q);
+        const matchAuthor = (d.author_name || '').toLowerCase().includes(q);
+        const matchCmd = (d.commander_name || '').toLowerCase().includes(q);
+        const matchTag = Array.isArray(d.tags) && d.tags.some(t => String(t).toLowerCase().includes(q));
+        const matchFormat = (d.format || '').toLowerCase().includes(q);
+        if (!matchName && !matchAuthor && !matchCmd && !matchTag && !matchFormat) return false;
+      }
+      return true;
+    });
+  }, [communityDecks, subTab, colorFilter, searchQuery]);
 
   // Determine active card list for Blown-Up Card View
   const activeZoomList = zoomContext === 'deck' ? orderedDeckCards : filteredPlayerInventory;
@@ -1005,10 +1062,16 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
       <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800 space-y-4">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
           <div>
-            <h1 className="text-lg sm:text-xl font-black text-slate-100 flex items-center gap-2">
-              <Globe className="w-5 h-5 text-amber-400" />
-              <span>AetherVault Community &amp; Deck Explorer</span>
-            </h1>
+            <div className="flex flex-wrap items-center gap-2.5">
+              <h1 className="text-lg sm:text-xl font-black text-slate-100 flex items-center gap-2">
+                <Globe className="w-5 h-5 text-amber-400" />
+                <span>AetherVault Community &amp; Deck Explorer</span>
+              </h1>
+              <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-[10px] font-bold flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                <span>Live Real-Time Sync</span>
+              </span>
+            </div>
             <p className="text-xs text-slate-400 mt-0.5">
               Search any player&apos;s decks across AetherVault, follow builders, inspect their card libraries, and copy any decklist to customize in your own vault.
             </p>
@@ -1026,7 +1089,7 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
               }`}
             >
               <Globe className="w-3.5 h-3.5" />
-              <span>All Decks</span>
+              <span>All Decks ({communityDecks.length})</span>
             </button>
 
             <button
@@ -1095,7 +1158,7 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
 
           <button
             type="button"
-            onClick={fetchCommunityExplore}
+            onClick={() => fetchCommunityExplore(false)}
             className="p-2.5 rounded-xl bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-300 cursor-pointer"
             title="Refresh Community"
           >
@@ -1107,7 +1170,7 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
       {/* Players Directory View */}
       {subTab === 'players' ? (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {players.map(player => {
+          {displayedPlayers.map(player => {
             const cStyle = AVATAR_COLOR_MAP[player.avatar_color || 'amber'] || AVATAR_COLOR_MAP.amber;
             return (
               <div
@@ -1305,15 +1368,15 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
           {subTab === 'following' && followedPlayers.length > 0 && (
             <h2 className="text-xs font-black uppercase tracking-wider text-slate-400 flex items-center gap-1.5 pt-1">
               <Layers className="w-4 h-4 text-amber-400" />
-              <span>Decks by Players You Follow ({communityDecks.length})</span>
+              <span>Decks by Players You Follow ({displayedDecks.length})</span>
             </h2>
           )}
 
-          {communityDecks.length === 0 ? (
+          {displayedDecks.length === 0 ? (
             subTab === 'following' ? (
               followedPlayers.length > 0 ? (
                 <div className="p-6 rounded-2xl bg-slate-900/70 border border-slate-800 text-center text-xs text-slate-400">
-                  The player(s) you follow haven&apos;t built any decks yet — click <strong className="text-slate-200">View Collection</strong> on their card above to browse their card inventory!
+                  The player(s) you follow haven&apos;t built any decks matching your filter yet — click <strong className="text-slate-200">View Collection</strong> on their card above to browse their card inventory!
                 </div>
               ) : null
             ) : (
@@ -1325,7 +1388,7 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
             )
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-              {communityDecks.map(deck => {
+              {displayedDecks.map(deck => {
                 const authorStyle = AVATAR_COLOR_MAP[deck.author_avatar_color || 'amber'] || AVATAR_COLOR_MAP.amber;
                 return (
                   <div

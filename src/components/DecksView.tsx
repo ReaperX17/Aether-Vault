@@ -53,6 +53,7 @@ interface DecksViewProps {
   decks: DeckSummary[];
   folders?: string[];
   selectedDeckId: number | null;
+  liveVersion?: number;
   onSelectDeck: (id: number | null) => void;
   onOpenSearchForDeck: (deckId: number, board?: BoardType) => void;
   onRefreshGlobal: () => Promise<void>;
@@ -62,6 +63,7 @@ export const DecksView: React.FC<DecksViewProps> = ({
   decks,
   folders = [],
   selectedDeckId,
+  liveVersion = 0,
   onSelectDeck,
   onOpenSearchForDeck,
   onRefreshGlobal
@@ -166,6 +168,13 @@ export const DecksView: React.FC<DecksViewProps> = ({
       setDeckDetail(null);
     }
   }, [selectedDeckId]);
+
+  // Automatically refresh open deck detail when cards are added via global Add Cards modal, Import modal, or live SSE event
+  useEffect(() => {
+    if (selectedDeckId) {
+      loadDeckDetail(selectedDeckId, false);
+    }
+  }, [decks, liveVersion]);
 
   function preserveScrollPosition(savedY: number) {
     requestAnimationFrame(() => {

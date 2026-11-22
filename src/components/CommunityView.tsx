@@ -170,7 +170,85 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
     return () => clearInterval(timer);
   }, [fetchCommunityExplore]);
 
+  function pushCommunityHistory(next: {
+    subTab?: 'all_decks' | 'following' | 'players';
+    playerId?: number | null;
+    playerVaultTab?: 'decks' | 'collection';
+    deckId?: number | null;
+  }) {
+    try {
+      const current = window.history.state || {};
+      window.history.pushState(
+        {
+          ...current,
+          __aethervault: true,
+          activeTab: 'community',
+          communitySubTab: next.subTab !== undefined ? next.subTab : subTab,
+          communityPlayerId: next.playerId !== undefined ? next.playerId : selectedPlayerId,
+          communityPlayerTab: next.playerVaultTab !== undefined ? next.playerVaultTab : playerVaultTab,
+          communityDeckId: next.deckId !== undefined ? next.deckId : selectedDeckId
+        },
+        ''
+      );
+    } catch {
+      // ignore
+    }
+  }
+
+  // Handle Browser Back / Forward buttons inside Community Explorer
+  useEffect(() => {
+    const onPopState = (e: PopStateEvent) => {
+      if (zoomCardIndex !== null) {
+        setZoomCardIndex(null);
+        return;
+      }
+      const st = e.state;
+      if (st && st.__aethervault && st.activeTab === 'community') {
+        if (st.communitySubTab) setSubTab(st.communitySubTab);
+        const nextDeckId = st.communityDeckId ?? null;
+        const nextPlayerId = st.communityPlayerId ?? null;
+        if (st.communityPlayerTab) setPlayerVaultTab(st.communityPlayerTab);
+
+        if (nextDeckId !== selectedDeckId) {
+          setSelectedDeckId(nextDeckId);
+          if (nextDeckId !== null) {
+            setDeckLoading(true);
+            fetch(`/api/community/decks/${nextDeckId}`)
+              .then(r => (r.ok ? r.json() : null))
+              .then(d => {
+                if (d) setDeckDetail(d);
+              })
+              .finally(() => setDeckLoading(false));
+          } else {
+            setDeckDetail(null);
+          }
+        }
+
+        if (nextPlayerId !== selectedPlayerId) {
+          setSelectedPlayerId(nextPlayerId);
+          if (nextPlayerId !== null) {
+            setPlayerLoading(true);
+            fetch(`/api/community/users/${nextPlayerId}`)
+              .then(r => (r.ok ? r.json() : null))
+              .then(d => {
+                if (d) setPlayerDetail(d);
+              })
+              .finally(() => setPlayerLoading(false));
+          } else {
+            setPlayerDetail(null);
+          }
+        }
+      } else {
+        setSelectedDeckId(null);
+        setSelectedPlayerId(null);
+      }
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, [zoomCardIndex, selectedDeckId, selectedPlayerId]);
+
   async function handleInspectPlayer(targetUserId: number, initialTab: 'decks' | 'collection' = 'decks') {
+    pushCommunityHistory({ playerId: targetUserId, playerVaultTab: initialTab, deckId: null });
     setSelectedDeckId(null);
     setSelectedPlayerId(targetUserId);
     setPlayerVaultTab(initialTab);
@@ -178,6 +256,7 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
     setPlayerInvColor('ALL');
     setPlayerInvLocation('ALL');
     setPlayerLoading(true);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
     try {
       const res = await fetch(`/api/community/users/${targetUserId}`);
       if (res.ok) {
@@ -189,8 +268,10 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
   }
 
   async function handleInspectDeck(deckId: number) {
+    pushCommunityHistory({ deckId });
     setSelectedDeckId(deckId);
     setDeckLoading(true);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
     try {
       const res = await fetch(`/api/community/decks/${deckId}`);
       if (res.ok) {
@@ -786,30 +867,36 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
             </div>
 
             {/* Sub-Tabs: Built Decks vs Card Collection */}
-            <div className="flex items-center gap-2 border-b border-slate-800 pb-3">
+            <div className="flex flex-wrap items-center gap-2.5 border-b border-slate-800 pb-3">
               <button
                 type="button"
-                onClick={() => setPlayerVaultTab('decks')}
-                className={`px-4 py-2 rounded-xl font-bold text-xs flex items-center gap-2 transition cursor-pointer ${
+                onClick={() => {
+                  pushCommunityHistory({ playerVaultTab: 'decks' });
+                  setPlayerVaultTab('decks');
+                }}
+                className={`px-4 py-2 rounded-xl font-bold text-xs flex items-center gap-2 transition whitespace-nowrap cursor-pointer ${
                   playerVaultTab === 'decks'
                     ? 'bg-amber-500 text-slate-950'
                     : 'bg-slate-900 text-slate-300 hover:bg-slate-800 border border-slate-800'
                 }`}
               >
-                <Layers className="w-4 h-4" />
+                <Layers className="w-4 h-4 shrink-0" />
                 <span>Built Decks ({playerDetail.decks.length})</span>
               </button>
 
               <button
                 type="button"
-                onClick={() => setPlayerVaultTab('collection')}
-                className={`px-4 py-2 rounded-xl font-bold text-xs flex items-center gap-2 transition cursor-pointer ${
+                onClick={() => {
+                  pushCommunityHistory({ playerVaultTab: 'collection' });
+                  setPlayerVaultTab('collection');
+                }}
+                className={`px-4 py-2 rounded-xl font-bold text-xs flex items-center gap-2 transition whitespace-nowrap cursor-pointer ${
                   playerVaultTab === 'collection'
                     ? 'bg-amber-500 text-slate-950'
                     : 'bg-slate-900 text-slate-300 hover:bg-slate-800 border border-slate-800'
                 }`}
               >
-                <FolderOpen className="w-4 h-4" />
+                <FolderOpen className="w-4 h-4 shrink-0" />
                 <span>Card Collection ({profile.totalCards.toLocaleString()} cards)</span>
               </button>
             </div>
@@ -940,7 +1027,7 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
                   )}
                 </div>
 
-                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3.5 sm:gap-4">
                   {filteredPlayerInventory.slice(0, 120).map((item, idx) => {
                     const flipKey = `player-inv-${item.id}`;
                     const isFlipped = Boolean(flippedCardKeys[flipKey]);
@@ -1059,62 +1146,71 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
       )}
 
       {/* Top Community Header & Search Bar */}
-      <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800 space-y-4">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
-          <div>
+      <div className="p-5 sm:p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-4">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+          <div className="space-y-1">
             <div className="flex flex-wrap items-center gap-2.5">
               <h1 className="text-lg sm:text-xl font-black text-slate-100 flex items-center gap-2">
-                <Globe className="w-5 h-5 text-amber-400" />
+                <Globe className="w-5 h-5 text-amber-400 shrink-0" />
                 <span>AetherVault Community &amp; Deck Explorer</span>
               </h1>
-              <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-[10px] font-bold flex items-center gap-1.5">
+              <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-[10px] font-bold flex items-center gap-1.5 whitespace-nowrap">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
                 <span>Live Real-Time Sync</span>
               </span>
             </div>
-            <p className="text-xs text-slate-400 mt-0.5">
+            <p className="text-xs text-slate-400 leading-relaxed">
               Search any player&apos;s decks across AetherVault, follow builders, inspect their card libraries, and copy any decklist to customize in your own vault.
             </p>
           </div>
 
           {/* Sub-Tabs */}
-          <div className="flex items-center gap-1.5 bg-slate-950 p-1 rounded-xl border border-slate-800 self-start">
+          <div className="flex flex-wrap items-center gap-1.5 bg-slate-950 p-1.5 rounded-xl border border-slate-800 self-start shrink-0">
             <button
               type="button"
-              onClick={() => setSubTab('all_decks')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${
+              onClick={() => {
+                pushCommunityHistory({ subTab: 'all_decks' });
+                setSubTab('all_decks');
+              }}
+              className={`px-3.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition whitespace-nowrap cursor-pointer ${
                 subTab === 'all_decks'
                   ? 'bg-amber-500 text-slate-950'
                   : 'text-slate-400 hover:text-slate-200'
               }`}
             >
-              <Globe className="w-3.5 h-3.5" />
+              <Globe className="w-3.5 h-3.5 shrink-0" />
               <span>All Decks ({communityDecks.length})</span>
             </button>
 
             <button
               type="button"
-              onClick={() => setSubTab('following')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${
+              onClick={() => {
+                pushCommunityHistory({ subTab: 'following' });
+                setSubTab('following');
+              }}
+              className={`px-3.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition whitespace-nowrap cursor-pointer ${
                 subTab === 'following'
                   ? 'bg-amber-500 text-slate-950'
                   : 'text-slate-400 hover:text-slate-200'
               }`}
             >
-              <Sparkles className="w-3.5 h-3.5" />
+              <Sparkles className="w-3.5 h-3.5 shrink-0" />
               <span>Following ({followedPlayers.length})</span>
             </button>
 
             <button
               type="button"
-              onClick={() => setSubTab('players')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${
+              onClick={() => {
+                pushCommunityHistory({ subTab: 'players' });
+                setSubTab('players');
+              }}
+              className={`px-3.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition whitespace-nowrap cursor-pointer ${
                 subTab === 'players'
                   ? 'bg-amber-500 text-slate-950'
                   : 'text-slate-400 hover:text-slate-200'
               }`}
             >
-              <Users className="w-3.5 h-3.5" />
+              <Users className="w-3.5 h-3.5 shrink-0" />
               <span>Players ({players.length})</span>
             </button>
           </div>

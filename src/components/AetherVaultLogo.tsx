@@ -3,6 +3,8 @@ import React from 'react';
 interface AetherVaultLogoProps {
   size?: 'sm' | 'md' | 'lg' | 'xl';
   showTagline?: boolean;
+  hideTaglineOnSmallScreens?: boolean;
+  stacked?: boolean;
   iconOnly?: boolean;
   className?: string;
 }
@@ -131,6 +133,8 @@ export const AetherVaultIconMark: React.FC<{ className?: string }> = ({ classNam
 export const AetherVaultLogo: React.FC<AetherVaultLogoProps> = ({
   size = 'md',
   showTagline = true,
+  hideTaglineOnSmallScreens = false,
+  stacked = false,
   iconOnly = false,
   className = ''
 }) => {
@@ -162,16 +166,20 @@ export const AetherVaultLogo: React.FC<AetherVaultLogoProps> = ({
           : 'text-[9px] sm:text-[10px]';
 
   return (
-    <div className={`inline-flex items-center gap-2.5 select-none group ${className}`}>
-      <div className="relative flex items-center justify-center">
+    <div
+      className={`inline-flex ${
+        stacked ? 'flex-col items-center text-center gap-2.5' : 'items-center gap-2.5 sm:gap-3'
+      } select-none group ${className}`}
+    >
+      <div className="relative flex items-center justify-center shrink-0">
         <div className="absolute -inset-1 rounded-2xl bg-gradient-to-tr from-amber-500/20 via-sky-500/15 to-violet-500/20 blur-md opacity-75 group-hover:opacity-100 transition" />
         <AetherVaultIconMark className={`relative ${iconDimensions} drop-shadow-md`} />
       </div>
 
       {!iconOnly && (
-        <div className="flex flex-col justify-center leading-none">
+        <div className={`flex flex-col justify-center ${stacked ? 'items-center' : 'items-start'} leading-none`}>
           <div
-            className={`font-black tracking-wider uppercase ${titleClasses} flex items-center`}
+            className={`font-black tracking-wider uppercase ${titleClasses} flex items-center whitespace-nowrap`}
             style={{ fontFamily: "'Cinzel', Georgia, serif" }}
           >
             <span className="text-slate-100 group-hover:text-white transition">AETHER</span>
@@ -181,7 +189,9 @@ export const AetherVaultLogo: React.FC<AetherVaultLogoProps> = ({
           </div>
           {showTagline && (
             <span
-              className={`font-bold uppercase tracking-[0.14em] text-sky-400/90 mt-0.5 ${taglineClasses}`}
+              className={`font-bold uppercase tracking-[0.12em] text-sky-400/90 mt-1 whitespace-nowrap ${taglineClasses} ${
+                hideTaglineOnSmallScreens ? 'hidden xl:inline-block' : ''
+              }`}
             >
               MTG Collection &amp; Deck Architect
             </span>

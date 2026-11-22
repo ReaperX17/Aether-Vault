@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
   LayoutDashboard,
   FolderOpen,
@@ -79,6 +79,9 @@ export const App: React.FC = () => {
   });
   const [inventoryLocationFilter, setInventoryLocationFilter] = useState<string>('ALL');
 
+  const isPopStateUpdateRef = useRef(false);
+  const historyInitializedRef = useRef(false);
+
   useEffect(() => {
     localStorage.setItem('aethervault_active_user_id', String(activeUserId));
   }, [activeUserId]);
@@ -127,6 +130,181 @@ export const App: React.FC = () => {
   const [isPublicServer, setIsPublicServer] = useState(false);
   const [activeDeviceSessions, setActiveDeviceSessions] = useState<number>(1);
   const [authModalOpen, setAuthModalOpen] = useState(false);
+
+  // Browser Back / Forward History Manager so pressing Back takes you to the previous screen instead of exiting the site
+  useEffect(() => {
+    if (historyInitializedRef.current) return;
+    historyInitializedRef.current = true;
+    const baseState = {
+      __aethervault: true,
+      __aethervaultRoot: true,
+      activeTab,
+      selectedDeckId,
+      inventoryLocationFilter
+    };
+    const activeState = {
+      __aethervault: true,
+      __aethervaultRoot: false,
+      activeTab,
+      selectedDeckId,
+      inventoryLocationFilter
+    };
+    try {
+      window.history.replaceState(baseState, '');
+      window.history.pushState(activeState, '');
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!historyInitializedRef.current) return;
+    if (isPopStateUpdateRef.current) {
+      isPopStateUpdateRef.current = false;
+      return;
+    }
+    const curr = window.history.state;
+    if (
+      curr &&
+      curr.__aethervault &&
+      !curr.__aethervaultRoot &&
+      curr.activeTab === activeTab &&
+      curr.selectedDeckId === selectedDeckId &&
+      curr.inventoryLocationFilter === inventoryLocationFilter
+    ) {
+      return;
+    }
+    try {
+      window.history.pushState(
+        {
+          __aethervault: true,
+          __aethervaultRoot: false,
+          activeTab,
+          selectedDeckId,
+          inventoryLocationFilter
+        },
+        ''
+      );
+    } catch {
+      // ignore
+    }
+  }, [activeTab, selectedDeckId, inventoryLocationFilter]);
+
+  useEffect(() => {
+    const anyModalOpen =
+      authModalOpen ||
+      searchModalOpen ||
+      importModalOpen ||
+      profilesModalOpen ||
+      wifiModalOpen ||
+      standaloneModalOpen ||
+      legalModalOpen;
+    if (anyModalOpen) {
+      try {
+        const curr = window.history.state || {};
+        if (!curr.__aethervaultModal) {
+          window.history.pushState({ ...curr, __aethervault: true, __aethervaultModal: true }, '');
+        }
+      } catch {
+        // ignore
+      }
+    }
+  }, [
+    authModalOpen,
+    searchModalOpen,
+    importModalOpen,
+    profilesModalOpen,
+    wifiModalOpen,
+    standaloneModalOpen,
+    legalModalOpen
+  ]);
+
+  useEffect(() => {
+    const onPopState = (e: PopStateEvent) => {
+      // 1. If any top-level modal is open, pressing Back closes the modal first
+      if (
+        authModalOpen ||
+        searchModalOpen ||
+        importModalOpen ||
+        profilesModalOpen ||
+        wifiModalOpen ||
+        standaloneModalOpen ||
+        legalModalOpen
+      ) {
+        setAuthModalOpen(false);
+        setSearchModalOpen(false);
+        setImportModalOpen(false);
+        setProfilesModalOpen(false);
+        setWifiModalOpen(false);
+        setStandaloneModalOpen(false);
+        setLegalModalOpen(false);
+        return;
+      }
+
+      const st = e.state;
+      if (st && st.__aethervault) {
+        isPopStateUpdateRef.current = true;
+        if (st.activeTab) {
+          setActiveTab(st.activeTab);
+        }
+        setSelectedDeckId(st.selectedDeckId ?? null);
+        setInventoryLocationFilter(st.inventoryLocationFilter || 'ALL');
+
+        // If the user backed all the way to the root sentinel entry, re-push an active entry so another Back press stays inside the app
+        if (st.__aethervaultRoot) {
+          const homeTab = isAuthenticated ? 'dashboard' : 'about';
+          setActiveTab(homeTab);
+          setSelectedDeckId(null);
+          try {
+            window.history.pushState(
+              {
+                __aethervault: true,
+                __aethervaultRoot: false,
+                activeTab: homeTab,
+                selectedDeckId: null,
+                inventoryLocationFilter: 'ALL'
+              },
+              ''
+            );
+          } catch {
+            // ignore
+          }
+        }
+      } else {
+        // Guard against falling off the history stack
+        const fallbackTab = isAuthenticated ? 'dashboard' : 'about';
+        isPopStateUpdateRef.current = true;
+        setActiveTab(fallbackTab);
+        setSelectedDeckId(null);
+        try {
+          window.history.pushState(
+            {
+              __aethervault: true,
+              __aethervaultRoot: false,
+              activeTab: fallbackTab,
+              selectedDeckId: null,
+              inventoryLocationFilter: 'ALL'
+            },
+            ''
+          );
+        } catch {
+          // ignore
+        }
+      }
+    };
+
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, [
+    isAuthenticated,
+    authModalOpen,
+    searchModalOpen,
+    importModalOpen,
+    profilesModalOpen,
+    wifiModalOpen,
+    standaloneModalOpen,
+    legalModalOpen
+  ]);
   const [authMode, setAuthMode] = useState<'login' | 'register' | 'forgot'>('login');
   const [authUsername, setAuthUsername] = useState('');
   const [authEmail, setAuthEmail] = useState('');
@@ -847,66 +1025,66 @@ export const App: React.FC = () => {
     <div className="min-h-screen flex flex-col bg-slate-950 text-slate-100">
       {/* Top Navigation Bar */}
       <header className="sticky top-0 z-30 bg-slate-950/90 backdrop-blur-md border-b border-slate-800/80">
-        <div className="max-w-7xl mx-auto px-3 sm:px-6 h-14 sm:h-16 flex items-center justify-between gap-2 sm:gap-3">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-15 sm:h-16 flex items-center justify-between gap-3 sm:gap-4">
           {/* Brand Logo */}
           <div
             onClick={() => setActiveTab(isAuthenticated ? 'dashboard' : 'about')}
             className="cursor-pointer shrink-0"
           >
-            <AetherVaultLogo size="sm" showTagline={true} />
+            <AetherVaultLogo size="sm" showTagline={true} hideTaglineOnSmallScreens={true} />
           </div>
 
           {/* Primary Navigation Tabs (Desktop & Tablet) */}
-          <nav className="hidden md:flex items-center gap-1 bg-slate-900 p-1 rounded-xl border border-slate-800">
+          <nav className="hidden md:flex items-center gap-1 bg-slate-900/95 p-1 rounded-xl border border-slate-800 shrink-0">
             <button
               onClick={() => setActiveTab('about')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition whitespace-nowrap cursor-pointer ${
                 activeTab === 'about'
                   ? 'bg-amber-500 text-slate-950 shadow-xs'
                   : 'text-slate-400 hover:text-slate-200'
               }`}
             >
-              <Sparkles className="w-3.5 h-3.5" />
+              <Sparkles className="w-3.5 h-3.5 shrink-0" />
               <span>Why AetherVault</span>
             </button>
 
             <button
               onClick={() => setActiveTab('community')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition whitespace-nowrap cursor-pointer ${
                 activeTab === 'community'
                   ? 'bg-amber-500 text-slate-950 shadow-xs'
                   : 'text-slate-400 hover:text-slate-200'
               }`}
             >
-              <Globe className="w-3.5 h-3.5" />
+              <Globe className="w-3.5 h-3.5 shrink-0" />
               <span>Community</span>
             </button>
 
             <button
               onClick={() => handleSelectProtectedTab('dashboard')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition whitespace-nowrap cursor-pointer ${
                 activeTab === 'dashboard' && isAuthenticated
                   ? 'bg-amber-500 text-slate-950 shadow-xs'
                   : 'text-slate-400 hover:text-slate-200'
               }`}
             >
-              <LayoutDashboard className="w-3.5 h-3.5" />
+              <LayoutDashboard className="w-3.5 h-3.5 shrink-0" />
               <span>Dashboard</span>
             </button>
 
             <button
               onClick={() => handleSelectProtectedTab('inventory')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition whitespace-nowrap cursor-pointer ${
                 activeTab === 'inventory' && isAuthenticated
                   ? 'bg-amber-500 text-slate-950 shadow-xs'
                   : 'text-slate-400 hover:text-slate-200'
               }`}
             >
-              <FolderOpen className="w-3.5 h-3.5" />
+              <FolderOpen className="w-3.5 h-3.5 shrink-0" />
               <span>Collection</span>
               {isAuthenticated && dashboardData && (
                 <span
-                  className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono ${
+                  className={`px-1.5 py-0.5 leading-none rounded-full text-[10px] font-mono ${
                     activeTab === 'inventory' ? 'bg-slate-950/20 text-slate-950' : 'bg-slate-800 text-slate-300'
                   }`}
                 >
@@ -917,17 +1095,17 @@ export const App: React.FC = () => {
 
             <button
               onClick={() => handleSelectProtectedTab('decks')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition whitespace-nowrap cursor-pointer ${
                 activeTab === 'decks' && isAuthenticated
                   ? 'bg-amber-500 text-slate-950 shadow-xs'
                   : 'text-slate-400 hover:text-slate-200'
               }`}
             >
-              <Layers className="w-3.5 h-3.5" />
+              <Layers className="w-3.5 h-3.5 shrink-0" />
               <span>Decks</span>
               {isAuthenticated && (
                 <span
-                  className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono ${
+                  className={`px-1.5 py-0.5 leading-none rounded-full text-[10px] font-mono ${
                     activeTab === 'decks' ? 'bg-slate-950/20 text-slate-950' : 'bg-slate-800 text-slate-300'
                   }`}
                 >
@@ -1067,7 +1245,7 @@ export const App: React.FC = () => {
       )}
 
       {/* Main Content Area */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 pt-4 pb-24 md:py-6">
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 pt-5 pb-28 md:py-7">
         {(activeTab === 'about' || (!isAuthenticated && activeTab !== 'community')) && (
           <WhyAetherVaultView
             isAuthenticated={isAuthenticated}
@@ -1300,7 +1478,7 @@ export const App: React.FC = () => {
             </button>
 
             <div className="flex flex-col items-center text-center space-y-2 pt-1">
-              <AetherVaultLogo size="md" showTagline={true} />
+              <AetherVaultLogo size="lg" showTagline={true} stacked={true} />
             </div>
 
             {/* Mode Toggle Tabs */}

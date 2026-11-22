@@ -18,8 +18,10 @@ import { AetherVaultLogo } from './AetherVaultLogo';
 interface WhyAetherVaultViewProps {
   isAuthenticated: boolean;
   onExploreCommunity: () => void;
-  onOpenAuthModal: (mode: 'login' | 'register') => void;
-  onGoToDashboard: () => void;
+  onOpenAuth?: (mode: 'login' | 'register') => void;
+  onOpenAuthModal?: (mode: 'login' | 'register') => void;
+  onEnterVault?: () => void;
+  onGoToDashboard?: () => void;
 }
 
 const DIFFERENCE_PILLARS = [
@@ -127,23 +129,34 @@ const COMPARISON_ROWS = [
 export const WhyAetherVaultView: React.FC<WhyAetherVaultViewProps> = ({
   isAuthenticated,
   onExploreCommunity,
+  onOpenAuth,
   onOpenAuthModal,
+  onEnterVault,
   onGoToDashboard
 }) => {
+  const triggerAuth = (mode: 'login' | 'register') => {
+    if (onOpenAuth) onOpenAuth(mode);
+    else if (onOpenAuthModal) onOpenAuthModal(mode);
+  };
+  const triggerDashboard = () => {
+    if (onEnterVault) onEnterVault();
+    else if (onGoToDashboard) onGoToDashboard();
+  };
+
   return (
-    <div className="space-y-8 pb-8">
+    <div className="space-y-10 sm:space-y-12 pb-10">
       {/* Hero Banner */}
-      <div className="relative rounded-3xl overflow-hidden border border-slate-800 bg-gradient-to-br from-slate-900 via-slate-950 to-indigo-950/60 p-6 sm:p-10 shadow-2xl">
+      <div className="relative rounded-3xl overflow-hidden border border-slate-800 bg-gradient-to-br from-slate-900 via-slate-950 to-indigo-950/60 px-5 py-8 sm:px-10 sm:py-12 shadow-2xl">
         <div className="absolute -top-24 -right-24 w-96 h-96 rounded-full bg-amber-500/10 blur-3xl pointer-events-none" />
         <div className="absolute -bottom-24 -left-24 w-96 h-96 rounded-full bg-sky-500/10 blur-3xl pointer-events-none" />
 
         <div className="relative max-w-4xl mx-auto text-center space-y-6">
           <div className="flex justify-center">
-            <AetherVaultLogo size="xl" showTagline />
+            <AetherVaultLogo size="xl" showTagline stacked />
           </div>
 
-          <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-300 text-xs font-bold">
-            <Sparkles className="w-3.5 h-3.5" />
+          <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-300 text-xs font-bold">
+            <Sparkles className="w-3.5 h-3.5 shrink-0" />
             <span>The All-in-One Magic: The Gathering Collection &amp; Commander Deck Platform</span>
           </div>
 
@@ -159,7 +172,7 @@ export const WhyAetherVaultView: React.FC<WhyAetherVaultViewProps> = ({
             <strong className="text-white">AetherVault</strong> brings them together so every deck you build, inspect, or copy from the community automatically knows which cards are sitting in your binders.
           </p>
 
-          <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
+          <div className="flex flex-wrap items-center justify-center gap-3.5 pt-2">
             <button
               type="button"
               onClick={onExploreCommunity}
@@ -173,7 +186,7 @@ export const WhyAetherVaultView: React.FC<WhyAetherVaultViewProps> = ({
             {isAuthenticated ? (
               <button
                 type="button"
-                onClick={onGoToDashboard}
+                onClick={triggerDashboard}
                 className="px-6 py-3.5 rounded-2xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-100 font-bold text-sm flex items-center gap-2 transition cursor-pointer"
               >
                 <Layers className="w-4 h-4 text-sky-400" />
@@ -183,7 +196,7 @@ export const WhyAetherVaultView: React.FC<WhyAetherVaultViewProps> = ({
               <>
                 <button
                   type="button"
-                  onClick={() => onOpenAuthModal('register')}
+                  onClick={() => triggerAuth('register')}
                   className="px-6 py-3.5 rounded-2xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-black text-sm flex items-center gap-2 shadow-lg shadow-sky-500/15 transition cursor-pointer"
                 >
                   <Sparkles className="w-4 h-4" />
@@ -191,7 +204,7 @@ export const WhyAetherVaultView: React.FC<WhyAetherVaultViewProps> = ({
                 </button>
                 <button
                   type="button"
-                  onClick={() => onOpenAuthModal('login')}
+                  onClick={() => triggerAuth('login')}
                   className="px-5 py-3.5 rounded-2xl bg-slate-900/90 hover:bg-slate-800 border border-slate-700 text-slate-200 font-bold text-sm transition cursor-pointer"
                 >
                   Sign In
@@ -200,17 +213,17 @@ export const WhyAetherVaultView: React.FC<WhyAetherVaultViewProps> = ({
             )}
           </div>
 
-          <div className="pt-2 flex flex-wrap items-center justify-center gap-4 text-xs text-slate-400">
+          <div className="pt-2 flex flex-wrap items-center justify-center gap-x-6 gap-y-2 text-xs text-slate-400">
             <span className="flex items-center gap-1.5">
-              <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
               100% Free to Explore &amp; Build
             </span>
             <span className="flex items-center gap-1.5">
-              <ShieldCheck className="w-4 h-4 text-sky-400" />
+              <ShieldCheck className="w-4 h-4 text-sky-400 shrink-0" />
               Private &amp; Isolated Personal Libraries
             </span>
             <span className="flex items-center gap-1.5">
-              <Copy className="w-4 h-4 text-amber-400" />
+              <Copy className="w-4 h-4 text-amber-400 shrink-0" />
               1-Click Community Deck Cloning
             </span>
           </div>
@@ -218,38 +231,38 @@ export const WhyAetherVaultView: React.FC<WhyAetherVaultViewProps> = ({
       </div>
 
       {/* Section 1: The AetherVault Difference (6 Core Pillars) */}
-      <div className="space-y-4">
-        <div className="text-center max-w-2xl mx-auto space-y-1.5">
+      <div className="space-y-6">
+        <div className="text-center max-w-2xl mx-auto space-y-2">
           <div className="text-xs font-extrabold uppercase tracking-widest text-amber-400">
             The AetherVault Difference
           </div>
           <h2 className="text-xl sm:text-2xl font-black text-slate-100">
             Designed Around How Paper Magic Players Actually Build
           </h2>
-          <p className="text-xs sm:text-sm text-slate-400">
+          <p className="text-xs sm:text-sm text-slate-400 leading-relaxed">
             Everything you need to organize binders, evaluate power levels for Rule 0 conversations, and share or remix decks with friends.
           </p>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
           {DIFFERENCE_PILLARS.map((pillar, idx) => {
             const Icon = pillar.icon;
             return (
               <div
                 key={idx}
-                className="p-5 rounded-2xl bg-slate-900/90 border border-slate-800 hover:border-amber-500/40 transition flex flex-col justify-between gap-4"
+                className="p-6 rounded-2xl bg-slate-900/90 border border-slate-800 hover:border-amber-500/40 transition flex flex-col justify-between gap-4"
               >
-                <div className="space-y-3">
+                <div className="space-y-3.5">
                   <div className="flex items-center justify-between gap-2">
-                    <div className={`w-10 h-10 rounded-xl border flex items-center justify-center ${pillar.accent}`}>
+                    <div className={`w-11 h-11 rounded-xl border flex items-center justify-center ${pillar.accent}`}>
                       <Icon className="w-5 h-5" />
                     </div>
-                    <span className="px-2.5 py-0.5 rounded-full bg-slate-950 border border-slate-800 text-[10px] font-bold uppercase tracking-wider text-slate-300">
+                    <span className="px-3 py-1 rounded-full bg-slate-950 border border-slate-800 text-[10px] font-bold uppercase tracking-wider text-slate-300">
                       {pillar.badge}
                     </span>
                   </div>
 
-                  <h3 className="text-base font-black text-slate-100">{pillar.title}</h3>
+                  <h3 className="text-base font-black text-slate-100 leading-snug">{pillar.title}</h3>
                   <p className="text-xs text-slate-400 leading-relaxed">{pillar.description}</p>
                 </div>
               </div>
@@ -259,16 +272,16 @@ export const WhyAetherVaultView: React.FC<WhyAetherVaultViewProps> = ({
       </div>
 
       {/* Section 2: How AetherVault Compares (Factual Comparison Table) */}
-      <div className="rounded-2xl bg-slate-900 border border-slate-800 overflow-hidden">
-        <div className="p-5 sm:p-6 border-b border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div>
+      <div className="rounded-2xl bg-slate-900 border border-slate-800 overflow-hidden shadow-lg">
+        <div className="p-6 sm:p-7 border-b border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="space-y-1">
             <div className="text-xs font-extrabold uppercase tracking-wider text-sky-400">
               Side-by-Side Overview
             </div>
-            <h2 className="text-lg sm:text-xl font-black text-slate-100 mt-0.5">
+            <h2 className="text-lg sm:text-xl font-black text-slate-100">
               How AetherVault Compares
             </h2>
-            <p className="text-xs text-slate-400 mt-0.5">
+            <p className="text-xs text-slate-400">
               A look at how AetherVault bridges the gap between standalone deckbuilders and collection spreadsheets.
             </p>
           </div>
@@ -276,7 +289,7 @@ export const WhyAetherVaultView: React.FC<WhyAetherVaultViewProps> = ({
           <button
             type="button"
             onClick={onExploreCommunity}
-            className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 self-start sm:self-auto cursor-pointer"
+            className="px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 self-start sm:self-auto whitespace-nowrap cursor-pointer"
           >
             <Globe className="w-3.5 h-3.5" />
             <span>Try the Deck Explorer Live</span>
@@ -284,29 +297,29 @@ export const WhyAetherVaultView: React.FC<WhyAetherVaultViewProps> = ({
         </div>
 
         <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse text-xs">
+          <table className="w-full min-w-[720px] text-left border-collapse text-xs">
             <thead>
               <tr className="bg-slate-950/90 border-b border-slate-800 text-[11px] uppercase tracking-wider text-slate-400">
-                <th className="py-3.5 px-4 font-bold">Capability / Workflow</th>
-                <th className="py-3.5 px-4 font-black text-amber-300 bg-amber-500/5 border-x border-amber-500/20">
+                <th className="py-4 px-5 font-bold w-[32%]">Capability / Workflow</th>
+                <th className="py-4 px-5 font-black text-amber-300 bg-amber-500/5 border-x border-amber-500/20 w-[28%]">
                   ✨ AetherVault
                 </th>
-                <th className="py-3.5 px-4 font-bold">Standard Deckbuilders</th>
-                <th className="py-3.5 px-4 font-bold">Binder / CSV Spreadsheets</th>
+                <th className="py-4 px-5 font-bold w-[22%]">Standard Deckbuilders</th>
+                <th className="py-4 px-5 font-bold w-[18%]">Binder / CSV Spreadsheets</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/80">
               {COMPARISON_ROWS.map((row, idx) => (
                 <tr key={idx} className="hover:bg-slate-950/40 transition">
-                  <td className="py-3.5 px-4 font-bold text-slate-200">{row.feature}</td>
-                  <td className="py-3.5 px-4 font-semibold text-emerald-300 bg-amber-500/5 border-x border-amber-500/15">
-                    <div className="flex items-center gap-1.5">
-                      <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <td className="py-4 px-5 font-bold text-slate-200 leading-relaxed">{row.feature}</td>
+                  <td className="py-4 px-5 font-semibold text-emerald-300 bg-amber-500/5 border-x border-amber-500/15 leading-relaxed">
+                    <div className="flex items-start gap-2">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
                       <span>{row.aethervault}</span>
                     </div>
                   </td>
-                  <td className="py-3.5 px-4 text-slate-400">{row.traditionalDeckbuilders}</td>
-                  <td className="py-3.5 px-4 text-slate-500">{row.spreadsheets}</td>
+                  <td className="py-4 px-5 text-slate-400 leading-relaxed">{row.traditionalDeckbuilders}</td>
+                  <td className="py-4 px-5 text-slate-500 leading-relaxed">{row.spreadsheets}</td>
                 </tr>
               ))}
             </tbody>
@@ -315,17 +328,17 @@ export const WhyAetherVaultView: React.FC<WhyAetherVaultViewProps> = ({
       </div>
 
       {/* Bottom Call-to-Action Banner */}
-      <div className="p-6 sm:p-8 rounded-2xl bg-gradient-to-r from-slate-900 via-slate-900 to-amber-950/30 border border-amber-500/30 flex flex-col md:flex-row items-center justify-between gap-4">
-        <div className="space-y-1 text-center md:text-left">
+      <div className="p-6 sm:p-8 rounded-2xl bg-gradient-to-r from-slate-900 via-slate-900 to-amber-950/30 border border-amber-500/30 flex flex-col md:flex-row items-center justify-between gap-5">
+        <div className="space-y-1.5 text-center md:text-left">
           <h3 className="text-lg font-black text-slate-100">
             Ready to Explore or Start Your Own Vault?
           </h3>
-          <p className="text-xs text-slate-300 max-w-xl">
+          <p className="text-xs text-slate-300 max-w-xl leading-relaxed">
             Browse real community Commander decks and player collections right now without logging in, or create a free account in seconds to import your cards and start building.
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center justify-center gap-2.5 shrink-0">
+        <div className="flex flex-wrap items-center justify-center gap-3 shrink-0">
           <button
             type="button"
             onClick={onExploreCommunity}
@@ -338,7 +351,7 @@ export const WhyAetherVaultView: React.FC<WhyAetherVaultViewProps> = ({
           {!isAuthenticated && (
             <button
               type="button"
-              onClick={() => onOpenAuthModal('register')}
+              onClick={() => triggerAuth('register')}
               className="px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs flex items-center gap-1.5 cursor-pointer"
             >
               <Sparkles className="w-3.5 h-3.5" />

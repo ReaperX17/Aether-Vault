@@ -143,10 +143,10 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
     fetchCommunityExplore();
   }, [fetchCommunityExplore]);
 
-  async function handleInspectPlayer(targetUserId: number) {
+  async function handleInspectPlayer(targetUserId: number, initialTab: 'decks' | 'collection' = 'decks') {
     setSelectedDeckId(null);
     setSelectedPlayerId(targetUserId);
-    setPlayerVaultTab('decks');
+    setPlayerVaultTab(initialTab);
     setPlayerInvSearch('');
     setPlayerInvColor('ALL');
     setPlayerInvLocation('ALL');
@@ -188,9 +188,16 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
       const nextCount = Number(json.followerCount || 0);
 
       setPlayers(prev =>
-        prev.map(p =>
-          p.id === targetUserId ? { ...p, isFollowing: nextFollow, followerCount: nextCount } : p
-        )
+        prev.map(p => {
+          if (p.id === targetUserId) {
+            return { ...p, isFollowing: nextFollow, followerCount: nextCount };
+          }
+          if (p.id === currentUserId) {
+            const delta = nextFollow ? 1 : -1;
+            return { ...p, followingCount: Math.max(0, (p.followingCount || 0) + delta) };
+          }
+          return p;
+        })
       );
       setCommunityDecks(prev =>
         prev.map(d =>
@@ -216,9 +223,7 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
           }
         });
       }
-      if (subTab === 'following') {
-        fetchCommunityExplore();
-      }
+      await fetchCommunityExplore();
     }
   }
 
@@ -322,6 +327,10 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
     if (!playerDetail) return [];
     return Array.from(new Set(playerDetail.inventory.map(i => i.location).filter(Boolean)));
   }, [playerDetail]);
+
+  const followedPlayers = useMemo(() => {
+    return players.filter(p => p.isFollowing);
+  }, [players]);
 
   // Determine active card list for Blown-Up Card View
   const activeZoomList = zoomContext === 'deck' ? orderedDeckCards : filteredPlayerInventory;
@@ -1030,7 +1039,7 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
               }`}
             >
               <Sparkles className="w-3.5 h-3.5" />
-              <span>Following</span>
+              <span>Following ({followedPlayers.length})</span>
             </button>
 
             <button
@@ -1170,38 +1179,150 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
                   </div>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={() => handleInspectPlayer(player.id)}
-                  className="w-full py-2 rounded-xl bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-200 font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
-                >
-                  <Eye className="w-3.5 h-3.5 text-amber-400" />
-                  <span>Browse {player.name}&apos;s Cards &amp; Decks</span>
-                </button>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleInspectPlayer(player.id, 'decks')}
+                    className="py-2 px-2.5 rounded-xl bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-200 font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <Layers className="w-3.5 h-3.5 text-amber-400" />
+                    <span>View Decks</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleInspectPlayer(player.id, 'collection')}
+                    className="py-2 px-2.5 rounded-xl bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-200 font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <FolderOpen className="w-3.5 h-3.5 text-sky-400" />
+                    <span>View Cards</span>
+                  </button>
+                </div>
               </div>
             );
           })}
         </div>
       ) : (
         /* Community Decks Grid (All Decks or Following Feed) */
-        <>
-          {communityDecks.length === 0 ? (
-            <div className="p-10 rounded-2xl bg-slate-900 border border-slate-800 text-center space-y-3">
-              <div className="text-sm font-bold text-slate-200">
-                {subTab === 'following'
-                  ? 'You are not following any players with decks yet.'
-                  : 'No matching community decks found.'}
-              </div>
-              {subTab === 'following' && (
+        <div className="space-y-6">
+          {subTab === 'following' && (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <h2 className="text-xs font-black uppercase tracking-wider text-amber-300 flex items-center gap-1.5">
+                  <Users className="w-4 h-4 text-amber-400" />
+                  <span>Players You Follow ({followedPlayers.length})</span>
+                </h2>
                 <button
                   type="button"
                   onClick={() => setSubTab('players')}
-                  className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs cursor-pointer"
+                  className="text-xs font-bold text-sky-400 hover:text-sky-300 cursor-pointer"
                 >
-                  Browse Players to Follow
+                  + Discover More Players →
                 </button>
+              </div>
+
+              {followedPlayers.length === 0 ? (
+                <div className="p-8 rounded-2xl bg-slate-900 border border-slate-800 text-center space-y-3">
+                  <div className="text-sm font-bold text-slate-200">
+                    You aren&apos;t following any players yet.
+                  </div>
+                  <p className="text-xs text-slate-400 max-w-md mx-auto">
+                    Follow other players to pin their card collections and Commander decks here for quick access.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setSubTab('players')}
+                    className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs cursor-pointer"
+                  >
+                    Browse Players to Follow
+                  </button>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {followedPlayers.map(player => {
+                    const cStyle = AVATAR_COLOR_MAP[player.avatar_color || 'amber'] || AVATAR_COLOR_MAP.amber;
+                    return (
+                      <div
+                        key={player.id}
+                        className="p-4 rounded-2xl bg-slate-900 border border-emerald-500/30 hover:border-amber-500/50 transition flex flex-col justify-between gap-3.5"
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <div
+                            onClick={() => handleInspectPlayer(player.id, 'decks')}
+                            className="flex items-center gap-3 min-w-0 cursor-pointer group"
+                          >
+                            <div
+                              className={`w-10 h-10 rounded-xl border ${cStyle.bg} ${cStyle.border} ${cStyle.text} flex items-center justify-center font-black text-sm shrink-0`}
+                            >
+                              {player.name.slice(0, 2).toUpperCase()}
+                            </div>
+                            <div className="min-w-0">
+                              <div className="font-bold text-sm text-slate-100 group-hover:text-amber-300 transition truncate">
+                                {player.name}
+                              </div>
+                              <div className="text-[11px] text-slate-400 font-mono">
+                                {player.totalCards.toLocaleString()} cards • {player.totalDecks} decks
+                              </div>
+                            </div>
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() => handleToggleFollow(player.id, true)}
+                            className="px-2.5 py-1 rounded-xl bg-emerald-500/20 hover:bg-rose-500/20 border border-emerald-500/40 hover:border-rose-500/40 text-emerald-300 hover:text-rose-300 font-bold text-[11px] flex items-center gap-1 transition cursor-pointer shrink-0"
+                            title="Click to unfollow"
+                          >
+                            <UserCheck className="w-3.5 h-3.5" />
+                            <span>Following</span>
+                          </button>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleInspectPlayer(player.id, 'collection')}
+                            className="py-2 px-2.5 rounded-xl bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-200 font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                          >
+                            <FolderOpen className="w-3.5 h-3.5 text-sky-400" />
+                            <span>View Collection ({player.totalCards.toLocaleString()})</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleInspectPlayer(player.id, 'decks')}
+                            className="py-2 px-2.5 rounded-xl bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-200 font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                          >
+                            <Layers className="w-3.5 h-3.5 text-amber-400" />
+                            <span>View Decks ({player.totalDecks})</span>
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
               )}
             </div>
+          )}
+
+          {subTab === 'following' && followedPlayers.length > 0 && (
+            <h2 className="text-xs font-black uppercase tracking-wider text-slate-400 flex items-center gap-1.5 pt-1">
+              <Layers className="w-4 h-4 text-amber-400" />
+              <span>Decks by Players You Follow ({communityDecks.length})</span>
+            </h2>
+          )}
+
+          {communityDecks.length === 0 ? (
+            subTab === 'following' ? (
+              followedPlayers.length > 0 ? (
+                <div className="p-6 rounded-2xl bg-slate-900/70 border border-slate-800 text-center text-xs text-slate-400">
+                  The player(s) you follow haven&apos;t built any decks yet — click <strong className="text-slate-200">View Collection</strong> on their card above to browse their card inventory!
+                </div>
+              ) : null
+            ) : (
+              <div className="p-10 rounded-2xl bg-slate-900 border border-slate-800 text-center space-y-3">
+                <div className="text-sm font-bold text-slate-200">
+                  No matching community decks found.
+                </div>
+              </div>
+            )
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
               {communityDecks.map(deck => {
@@ -1317,7 +1438,7 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
               })}
             </div>
           )}
-        </>
+        </div>
       )}
     </div>
   );

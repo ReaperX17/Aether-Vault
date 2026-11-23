@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
+import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { db, upsertCardCache } from './db.mjs';
 import {
@@ -48,12 +49,14 @@ process.on('unhandledRejection', reason => {
 let dataCacheVersion = 1;
 const cachedInventoryByUser = new Map();
 const cachedDecksByUser = new Map();
+const cachedDeckCardsById = new Map();
 const sseClients = new Set();
 
-function broadcastVaultUpdate(reason = 'update') {
+function broadcastVaultUpdate(reason = 'update', actorClientId = null) {
   const payload = JSON.stringify({
     version: dataCacheVersion,
     reason,
+    actorClientId,
     timestamp: Date.now()
   });
   const msg = `event: vault_update\ndata: ${payload}\n\n`;
@@ -66,12 +69,13 @@ function broadcastVaultUpdate(reason = 'update') {
   }
 }
 
-function invalidateDataCache(reason = 'update', broadcast = true) {
+function invalidateDataCache(reason = 'update', broadcast = true, actorClientId = null) {
   dataCacheVersion++;
   cachedInventoryByUser.clear();
   cachedDecksByUser.clear();
+  cachedDeckCardsById.clear();
   if (broadcast) {
-    broadcastVaultUpdate(reason);
+    broadcastVaultUpdate(reason, actorClientId);
   }
 }
 
@@ -459,7 +463,25 @@ function getSecurityHeaders(isPublic = false) {
 
 function sendJson(res, status, payload, extraHeaders = {}) {
   if (res.__reqMethod && res.__reqMethod !== 'GET' && status >= 200 && status < 300) {
-    invalidateDataCache(res.__reqPath || 'mutation', true);
+    invalidateDataCache(res.__reqPath || 'mutation', true, res.__clientId || null);
+  }
+  const rawBody = JSON.stringify(payload);
+  if (res.__acceptGzip && rawBody.length > 1024) {
+    try {
+      const compressed = zlib.gzipSync(rawBody);
+      res.writeHead(status, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Encoding': 'gzip',
+        'Vary': 'Accept-Encoding',
+        'Cache-Control': 'no-store',
+        ...getSecurityHeaders(isProd),
+        ...extraHeaders
+      });
+      res.end(compressed);
+      return;
+    } catch {
+      // Fall back to uncompressed JSON below
+    }
   }
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
@@ -467,7 +489,7 @@ function sendJson(res, status, payload, extraHeaders = {}) {
     ...getSecurityHeaders(isProd),
     ...extraHeaders
   });
-  res.end(JSON.stringify(payload));
+  res.end(rawBody);
 }
 
 function getAllActiveDeckUsages(userId = 1) {
@@ -538,6 +560,12 @@ function getAllInventoryEnriched(userId = 1) {
 }
 
 function getDeckCardsEnriched(deckId) {
+  const numId = Number(deckId);
+  const cached = cachedDeckCardsById.get(numId);
+  if (cached && cached.version === dataCacheVersion) {
+    return cached.cards;
+  }
+
   const rows = db.prepare(`
     SELECT
       dc.id, dc.deck_id, dc.scryfall_id, dc.name, dc.quantity,
@@ -564,9 +592,9 @@ function getDeckCardsEnriched(deckId) {
       END,
       c.cmc ASC,
       dc.name ASC
-  `).all(deckId);
+  `).all(numId);
 
-  return rows.map(r => {
+  const cards = rows.map(r => {
     const card = hydrateCardRow(r);
     const unit = getCardUnitPrice(card, card.finish);
     return {
@@ -576,6 +604,8 @@ function getDeckCardsEnriched(deckId) {
       unit_ck_buylist: unit.ckBuylist
     };
   });
+  cachedDeckCardsById.set(numId, { version: dataCacheVersion, cards });
+  return cards;
 }
 
 async function handleApi(req, res, url) {
@@ -583,9 +613,11 @@ async function handleApi(req, res, url) {
   const method = req.method || 'GET';
   res.__reqMethod = method;
   res.__reqPath = pathname;
+  res.__clientId = typeof req.headers['x-client-id'] === 'string' ? req.headers['x-client-id'] : null;
+  res.__acceptGzip = String(req.headers['accept-encoding'] || '').includes('gzip');
 
   if (method !== 'GET') {
-    invalidateDataCache(pathname, false);
+    invalidateDataCache(pathname, false, res.__clientId);
   }
 
   try {
@@ -3422,22 +3454,37 @@ async function startServer() {
         '.html': 'text/html; charset=utf-8',
         '.js': 'application/javascript; charset=utf-8',
         '.css': 'text/css; charset=utf-8',
-        '.json': 'application/json',
-        '.svg': 'image/svg+xml',
+        '.json': 'application/json; charset=utf-8',
+        '.svg': 'image/svg+xml; charset=utf-8',
+        '.xml': 'application/xml; charset=utf-8',
+        '.txt': 'text/plain; charset=utf-8',
+        '.webmanifest': 'application/manifest+json; charset=utf-8',
         '.png': 'image/png',
         '.jpg': 'image/jpeg',
         '.ico': 'image/x-icon',
         '.woff2': 'font/woff2'
       };
       const isHashedAsset = url.pathname.startsWith('/assets/');
-      res.writeHead(200, {
+      const acceptGzip = String(req.headers['accept-encoding'] || '').includes('gzip');
+      const compressibleExts = new Set(['.html', '.js', '.css', '.json', '.svg', '.xml', '.txt', '.webmanifest']);
+      const baseHeaders = {
         'Content-Type': mimeTypes[ext] || 'application/octet-stream',
         'Cache-Control': isHashedAsset ? 'public, max-age=31536000, immutable' : 'no-cache',
         'X-Content-Type-Options': 'nosniff',
         'X-Frame-Options': 'SAMEORIGIN',
         'Referrer-Policy': 'strict-origin-when-cross-origin'
-      });
-      fs.createReadStream(filePath).pipe(res);
+      };
+      if (acceptGzip && compressibleExts.has(ext)) {
+        res.writeHead(200, {
+          ...baseHeaders,
+          'Content-Encoding': 'gzip',
+          'Vary': 'Accept-Encoding'
+        });
+        fs.createReadStream(filePath).pipe(zlib.createGzip()).pipe(res);
+      } else {
+        res.writeHead(200, baseHeaders);
+        fs.createReadStream(filePath).pipe(res);
+      }
     });
   }
 

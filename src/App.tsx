@@ -88,6 +88,14 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     localStorage.setItem('aethervault_active_tab', activeTab);
+    const titleMap: Record<string, string> = {
+      about: 'AetherVault — The AetherVault Difference | MTG Collection & Commander Deck Builder',
+      community: 'Community Decks & Player Vaults | AetherVault MTG Deck Explorer',
+      dashboard: 'My Vault Dashboard | AetherVault MTG Collection Manager',
+      inventory: 'My Card Collection & Binders | AetherVault MTG Tracker',
+      decks: 'Commander Deck Architect & Bracket Analyzer | AetherVault'
+    };
+    document.title = titleMap[activeTab] || 'AetherVault — MTG Collection Manager & Commander Deck Builder';
   }, [activeTab]);
 
   useEffect(() => {
@@ -461,20 +469,48 @@ export const App: React.FC = () => {
     fetchAllData();
   }, [fetchAllData]);
 
-  // Real-time Server-Sent Events (SSE) subscription + window focus sync so new users, new decks,
-  // follows, and card updates appear automatically across all tabs and users in real time
+  // Real-time Server-Sent Events (SSE) subscription for cross-device / community updates.
+  // Ignores self-echoes (events triggered by this exact browser tab) and debounces updates so
+  // it never lags, interrupts typing, or resets active work.
   useEffect(() => {
     let es: EventSource | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastHiddenAt = 0;
     let unmounted = false;
+
+    const myClientId = (window as any).__aethervaultClientId || '';
+
+    const scheduleRemoteSync = () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        if (unmounted) return;
+        const activeTag = (document.activeElement?.tagName || '').toLowerCase();
+        const isUserTyping = activeTag === 'input' || activeTag === 'textarea' || activeTag === 'select';
+        setLiveVersion(v => v + 1);
+        if (!isUserTyping) {
+          fetchAllData();
+        } else {
+          refreshDashboardAndDecks();
+        }
+      }, 650);
+    };
 
     const connectSse = () => {
       if (unmounted) return;
       try {
         es = new EventSource('/api/events');
-        es.addEventListener('vault_update', () => {
-          setLiveVersion(v => v + 1);
-          fetchAllData();
+        es.addEventListener('vault_update', (evt: MessageEvent) => {
+          try {
+            const parsed = JSON.parse(evt.data || '{}');
+            // Skip self-echoes: this tab already updated its own state when it sent the request
+            if (parsed.actorClientId && myClientId && parsed.actorClientId === myClientId) {
+              return;
+            }
+          } catch {
+            // ignore JSON parse errors
+          }
+          scheduleRemoteSync();
         });
         es.onerror = () => {
           if (es) {
@@ -482,7 +518,7 @@ export const App: React.FC = () => {
             es = null;
           }
           if (!unmounted) {
-            reconnectTimer = setTimeout(connectSse, 4000);
+            reconnectTimer = setTimeout(connectSse, 5000);
           }
         };
       } catch {
@@ -492,23 +528,26 @@ export const App: React.FC = () => {
 
     connectSse();
 
-    const onWindowFocusOrVisible = () => {
-      if (document.visibilityState === 'visible') {
-        setLiveVersion(v => v + 1);
-        fetchAllData();
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        lastHiddenAt = Date.now();
+      } else if (document.visibilityState === 'visible') {
+        // Only sync if the tab was hidden in the background for > 45 seconds (never on prompt/dropdown focus!)
+        if (lastHiddenAt > 0 && Date.now() - lastHiddenAt > 45000) {
+          scheduleRemoteSync();
+        }
       }
     };
-    window.addEventListener('focus', onWindowFocusOrVisible);
-    document.addEventListener('visibilitychange', onWindowFocusOrVisible);
+    document.addEventListener('visibilitychange', onVisibilityChange);
 
     return () => {
       unmounted = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (debounceTimer) clearTimeout(debounceTimer);
       if (es) es.close();
-      window.removeEventListener('focus', onWindowFocusOrVisible);
-      document.removeEventListener('visibilitychange', onWindowFocusOrVisible);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
     };
-  }, [fetchAllData]);
+  }, [fetchAllData, refreshDashboardAndDecks]);
 
   useEffect(() => {
     if (!serverOffline) return;

@@ -109,6 +109,14 @@ export const DecksView: React.FC<DecksViewProps> = ({
   const [newFolderInputName, setNewFolderInputName] = useState<string>('');
   const [renamingFolder, setRenamingFolder] = useState<string | null>(null);
   const [renameFolderValue, setRenameFolderValue] = useState<string>('');
+  const [folderPromptState, setFolderPromptState] = useState<
+    | { mode: 'move_single'; deckId: number }
+    | { mode: 'move_bulk' }
+    | { mode: 'paste_folder' }
+    | { mode: 'create_folder' }
+    | null
+  >(null);
+  const [folderPromptInput, setFolderPromptInput] = useState<string>('');
 
   // Inside-deck card multi-select & delete states
   const [selectedCardRowIds, setSelectedCardRowIds] = useState<Set<number>>(new Set());
@@ -159,6 +167,11 @@ export const DecksView: React.FC<DecksViewProps> = ({
     missingCostCkRetail: number;
   } | null>(null);
 
+  const activeDeckSummaryTotalCards = useMemo(
+    () => (selectedDeckId ? decks.find(d => d.id === selectedDeckId)?.total_cards ?? null : null),
+    [decks, selectedDeckId]
+  );
+
   useEffect(() => {
     setSelectedCardRowIds(new Set());
     setConfirmInsideAction(null);
@@ -169,12 +182,25 @@ export const DecksView: React.FC<DecksViewProps> = ({
     }
   }, [selectedDeckId]);
 
-  // Automatically refresh open deck detail when cards are added via global Add Cards modal, Import modal, or live SSE event
+  // Automatically refresh open deck detail when cards are added externally via global Add Cards modal, Import modal, or remote SSE event
   useEffect(() => {
-    if (selectedDeckId) {
+    if (!selectedDeckId) return;
+    if (deckDetail && deckDetail.deck?.id === selectedDeckId && activeDeckSummaryTotalCards !== null) {
+      const currentLoadedTotal =
+        (deckDetail.analysis?.counts?.commander || 0) +
+        (deckDetail.analysis?.counts?.mainboard || 0) +
+        (deckDetail.analysis?.counts?.sideboard || 0);
+      if (currentLoadedTotal !== activeDeckSummaryTotalCards) {
+        loadDeckDetail(selectedDeckId, false);
+      }
+    }
+  }, [activeDeckSummaryTotalCards]);
+
+  useEffect(() => {
+    if (selectedDeckId && liveVersion > 0) {
       loadDeckDetail(selectedDeckId, false);
     }
-  }, [decks, liveVersion]);
+  }, [liveVersion]);
 
   function preserveScrollPosition(savedY: number) {
     requestAnimationFrame(() => {
@@ -576,17 +602,16 @@ export const DecksView: React.FC<DecksViewProps> = ({
   }
 
   async function handleMoveDeckToFolder(deckId: number, targetFolder: string) {
-    let clean = targetFolder;
     if (targetFolder === '__NEW__') {
-      const entered = window.prompt('Enter new folder name:');
-      if (!entered || !entered.trim()) return;
-      clean = entered.trim();
+      setFolderPromptInput('');
+      setFolderPromptState({ mode: 'move_single', deckId });
+      return;
     }
     const savedY = window.scrollY;
     await fetch(`/api/decks/${deckId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ folder: clean })
+      body: JSON.stringify({ folder: targetFolder })
     });
     if (selectedDeckId === deckId) {
       await loadDeckDetail(deckId, false);
@@ -598,22 +623,97 @@ export const DecksView: React.FC<DecksViewProps> = ({
 
   async function handleBulkMoveDecksToFolder(targetFolder: string) {
     if (!targetFolder || selectedDeckIds.size === 0) return;
-    let clean = targetFolder;
     if (targetFolder === '__NEW__') {
-      const entered = window.prompt('Enter new folder name for selected decks:');
-      if (!entered || !entered.trim()) return;
-      clean = entered.trim();
+      setFolderPromptInput('');
+      setFolderPromptState({ mode: 'move_bulk' });
+      return;
     }
     const savedY = window.scrollY;
     await fetch('/api/decks/bulk-move', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ids: Array.from(selectedDeckIds), folder: clean })
+      body: JSON.stringify({ ids: Array.from(selectedDeckIds), folder: targetFolder })
     });
     setSelectedDeckIds(new Set());
     preserveScrollPosition(savedY);
     await onRefreshGlobal();
     preserveScrollPosition(savedY);
+  }
+
+  async function handleConfirmFolderPrompt(e: React.FormEvent) {
+    e.preventDefault();
+    const clean = folderPromptInput.trim();
+    if (!clean || !folderPromptState) return;
+    const currentMode = folderPromptState;
+    setFolderPromptState(null);
+    setFolderPromptInput('');
+
+    if (currentMode.mode === 'move_single') {
+      await handleMoveDeckToFolder(currentMode.deckId, clean);
+    } else if (currentMode.mode === 'move_bulk') {
+      await handleBulkMoveDecksToFolder(clean);
+    } else if (currentMode.mode === 'paste_folder') {
+      setPasteDeckFolder(clean);
+    } else if (currentMode.mode === 'create_folder') {
+      setNewFolder(clean);
+    }
+  }
+
+  function renderFolderPromptModal() {
+    if (!folderPromptState) return null;
+    return (
+      <div
+        className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/85 backdrop-blur-sm p-4"
+        onClick={() => setFolderPromptState(null)}
+      >
+        <form
+          onSubmit={handleConfirmFolderPrompt}
+          onClick={e => e.stopPropagation()}
+          className="w-full max-w-sm rounded-2xl bg-slate-900 border border-slate-700 p-5 shadow-2xl space-y-4"
+        >
+          <div className="flex items-center justify-between border-b border-slate-800 pb-2.5">
+            <h3 className="text-sm font-black text-slate-100 flex items-center gap-2">
+              <FolderPlus className="w-4 h-4 text-amber-400" />
+              <span>Create New Deck Folder</span>
+            </h3>
+            <button
+              type="button"
+              onClick={() => setFolderPromptState(null)}
+              className="px-2 py-0.5 rounded-lg bg-slate-800 text-slate-300 hover:text-white text-xs cursor-pointer"
+            >
+              ✕
+            </button>
+          </div>
+          <div>
+            <label className="block text-xs font-bold text-slate-300 mb-1.5">Folder Name</label>
+            <input
+              type="text"
+              required
+              autoFocus
+              placeholder="e.g., cEDH, Precons, Brewing..."
+              value={folderPromptInput}
+              onChange={e => setFolderPromptInput(e.target.value)}
+              className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-sm text-slate-100 focus:outline-none focus:border-amber-500"
+            />
+          </div>
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setFolderPromptState(null)}
+              className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs cursor-pointer"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs cursor-pointer"
+            >
+              Use Folder
+            </button>
+          </div>
+        </form>
+      </div>
+    );
   }
 
   async function handleBulkDeleteDeckCards(mode: 'selected' | 'all') {
@@ -1441,8 +1541,8 @@ export const DecksView: React.FC<DecksViewProps> = ({
                   value={pasteDeckFolder}
                   onChange={e => {
                     if (e.target.value === '__NEW__') {
-                      const entered = window.prompt('Enter new folder name:');
-                      if (entered && entered.trim()) setPasteDeckFolder(entered.trim());
+                      setFolderPromptInput('');
+                      setFolderPromptState({ mode: 'paste_folder' });
                     } else {
                       setPasteDeckFolder(e.target.value);
                     }
@@ -2587,8 +2687,8 @@ export const DecksView: React.FC<DecksViewProps> = ({
                     value={newFolder}
                     onChange={e => {
                       if (e.target.value === '__NEW__') {
-                        const entered = window.prompt('Enter new folder name:');
-                        if (entered && entered.trim()) setNewFolder(entered.trim());
+                        setFolderPromptInput('');
+                        setFolderPromptState({ mode: 'create_folder' });
                       } else {
                         setNewFolder(e.target.value);
                       }
@@ -2719,6 +2819,7 @@ export const DecksView: React.FC<DecksViewProps> = ({
         )}
 
         {renderPasteDeckModal()}
+        {renderFolderPromptModal()}
       </div>
     );
   }
@@ -4817,6 +4918,7 @@ export const DecksView: React.FC<DecksViewProps> = ({
       )}
 
       {renderPasteDeckModal()}
+      {renderFolderPromptModal()}
     </div>
   );
 };

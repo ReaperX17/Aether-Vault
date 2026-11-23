@@ -528,7 +528,6 @@ export function hydrateCardRow(row) {
     parsed = {
       colors: safeJsonParse(row.colors, []),
       color_identity: safeJsonParse(row.color_identity, []),
-      legalities: safeJsonParse(row.legalities, {}),
       produced_mana: safeJsonParse(row.produced_mana, []),
       keywords: safeJsonParse(row.keywords, [])
     };
@@ -536,11 +535,11 @@ export function hydrateCardRow(row) {
       parsedCardJsonCache.set(sId, parsed);
     }
   }
+  const { legalities: _unusedLegalities, ...rest } = row;
   return {
-    ...row,
+    ...rest,
     colors: parsed.colors,
     color_identity: parsed.color_identity,
-    legalities: parsed.legalities,
     produced_mana: parsed.produced_mana,
     keywords: parsed.keywords
   };

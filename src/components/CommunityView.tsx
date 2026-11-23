@@ -111,9 +111,16 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
   } | null>(null);
   const [deckLoading, setDeckLoading] = useState(false);
 
-  // Clone / Copy Deck Status & Prompt
+  // Clone / Copy Deck Status & In-App Prompt Modal
   const [cloningDeckId, setCloningDeckId] = useState<number | null>(null);
   const [cloneToast, setCloneToast] = useState<string | null>(null);
+  const [cloneModalTarget, setCloneModalTarget] = useState<{
+    deckId: number;
+    deckName: string;
+    authorName: string;
+  } | null>(null);
+  const [cloneNameInput, setCloneNameInput] = useState<string>('');
+  const [cloneFolderInput, setCloneFolderInput] = useState<string>('Community Copies');
 
   // Blown-up Card Zoom Modal + Transform Flip states
   const [zoomCardIndex, setZoomCardIndex] = useState<number | null>(null);
@@ -161,14 +168,6 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
         .catch(() => {});
     }
   }, [liveVersion, fetchCommunityExplore, selectedPlayerId, selectedDeckId]);
-
-  // Background heartbeat poll fallback every 8 seconds so even behind buffering proxies new users & decks appear automatically
-  useEffect(() => {
-    const timer = setInterval(() => {
-      fetchCommunityExplore(true);
-    }, 8000);
-    return () => clearInterval(timer);
-  }, [fetchCommunityExplore]);
 
   function pushCommunityHistory(next: {
     subTab?: 'all_decks' | 'following' | 'players';
@@ -335,16 +334,22 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
     }
   }
 
-  async function handleCloneDeck(deckId: number, deckName: string, authorName: string) {
+  function handleCloneDeck(deckId: number, deckName: string, authorName: string) {
     if (!isAuthenticated) {
       onRequireAuth?.('register');
       return;
     }
-    const customName = window.prompt(
-      `Copy "${deckName}" (by ${authorName}) into your own personal Decks so you can modify it freely.\n\nChoose a name for your copy:`,
-      `${deckName} (${authorName} Copy)`
-    );
-    if (customName === null) return;
+    setCloneModalTarget({ deckId, deckName, authorName });
+    setCloneNameInput(`${deckName} (${authorName} Copy)`);
+    setCloneFolderInput('Community Copies');
+  }
+
+  async function handleConfirmCloneDeck(e: React.FormEvent) {
+    e.preventDefault();
+    if (!cloneModalTarget) return;
+    const { deckId, deckName, authorName } = cloneModalTarget;
+    const finalName = cloneNameInput.trim() || `${deckName} (${authorName} Copy)`;
+    const finalFolder = cloneFolderInput.trim() || 'Community Copies';
 
     setCloningDeckId(deckId);
     try {
@@ -352,12 +357,13 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          name: customName.trim() || `${deckName} (${authorName} Copy)`,
-          folder: 'Community Copies'
+          name: finalName,
+          folder: finalFolder
         })
       });
       const json = await res.json();
       if (res.ok && json.deckId) {
+        setCloneModalTarget(null);
         setCloneToast(json.message || `Copied "${deckName}" to your Decks!`);
         setTimeout(() => setCloneToast(null), 4000);
         onDeckCloned(Number(json.deckId));
@@ -366,6 +372,85 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
       setCloningDeckId(null);
     }
   }
+
+  const cloneModalElement = cloneModalTarget ? (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 backdrop-blur-sm p-4"
+      onClick={() => setCloneModalTarget(null)}
+    >
+      <form
+        onSubmit={handleConfirmCloneDeck}
+        onClick={e => e.stopPropagation()}
+        className="w-full max-w-md rounded-2xl bg-slate-900 border border-slate-700 p-6 shadow-2xl space-y-4"
+      >
+        <div className="flex items-start justify-between gap-3 border-b border-slate-800 pb-3">
+          <div>
+            <h3 className="text-base font-black text-slate-100 flex items-center gap-2">
+              <Copy className="w-4 h-4 text-amber-400" />
+              <span>Copy Deck to Your Personal Vault</span>
+            </h3>
+            <p className="text-xs text-slate-400 mt-1">
+              Creates your own editable copy of <strong className="text-slate-200">&ldquo;{cloneModalTarget.deckName}&rdquo;</strong> (by {cloneModalTarget.authorName}) and matches cards you already own.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setCloneModalTarget(null)}
+            className="px-2 py-1 rounded-lg bg-slate-800 text-slate-300 hover:text-white text-xs cursor-pointer"
+          >
+            ✕
+          </button>
+        </div>
+
+        <div className="space-y-3">
+          <div>
+            <label className="block text-xs font-bold text-slate-300 mb-1">
+              Deck Name in Your Vault
+            </label>
+            <input
+              type="text"
+              required
+              autoFocus
+              value={cloneNameInput}
+              onChange={e => setCloneNameInput(e.target.value)}
+              className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-sm text-slate-100 focus:outline-none focus:border-amber-500"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-bold text-slate-300 mb-1">
+              Deck Folder
+            </label>
+            <input
+              type="text"
+              value={cloneFolderInput}
+              onChange={e => setCloneFolderInput(e.target.value)}
+              placeholder="Community Copies"
+              className="w-full px-3.5 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs text-slate-100 focus:outline-none focus:border-amber-500"
+            />
+          </div>
+        </div>
+
+        <div className="flex items-center justify-end gap-2 pt-2">
+          <button
+            type="button"
+            onClick={() => setCloneModalTarget(null)}
+            className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs cursor-pointer"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            disabled={cloningDeckId !== null}
+            className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-slate-950 font-black text-xs flex items-center gap-1.5 cursor-pointer"
+          >
+            <Copy className="w-3.5 h-3.5" />
+            <span>{cloningDeckId !== null ? 'Copying...' : 'Copy Deck to My Vault'}</span>
+          </button>
+        </div>
+      </form>
+    </div>
+  ) : null;
 
   // Group inspected deck cards by Archidekt-style sections
   const deckSections = useMemo(() => {
@@ -764,6 +849,7 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
           sections={zoomContext === 'deck' ? deckZoomSections : undefined}
           onJumpToIndex={idx => setZoomCardIndex(idx)}
         />
+        {cloneModalElement}
       </div>
     );
   }
@@ -1129,6 +1215,7 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
               : undefined
           }
         />
+        {cloneModalElement}
       </div>
     );
   }
@@ -1599,6 +1686,7 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
           )}
         </div>
       )}
+      {cloneModalElement}
     </div>
   );
 };
